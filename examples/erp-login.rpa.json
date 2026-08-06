@@ -1,0 +1,94 @@
+{
+  "name": "erp-login",
+  "version": 1,
+  "description": "Anchor-based login: finds the Login button by its on-screen text rather than a coordinate, so the flow survives the window being moved or resized. Requires the vision module with OCR models loaded.",
+  "variables": {
+    "username": "demo",
+    "password": ""
+  },
+  "steps": [
+    {
+      "id": "focus_erp",
+      "type": "window_activate",
+      "title_match": "ERP",
+      "match": "contains"
+    },
+    {
+      "id": "find_username_field",
+      "type": "ocr_find",
+      "text": "Username",
+      "match": "contains",
+      "offset_x": 140,
+      "retry": { "times": 5, "interval_ms": 600 },
+      "save_to_var": "username_field",
+      "comment": "The offset moves right off the label and onto the input box next to it."
+    },
+    {
+      "id": "click_username",
+      "type": "click",
+      "target": {
+        "kind": "ocr",
+        "text": "Username",
+        "match": "contains",
+        "offset_x": 140,
+        "retry": { "times": 5, "interval_ms": 600 }
+      },
+      "button": "left"
+    },
+    {
+      "id": "enter_username",
+      "type": "type_text",
+      "text": "{{username}}",
+      "interval_ms": 15
+    },
+    {
+      "id": "tab_to_password",
+      "type": "key_press",
+      "keys": "tab"
+    },
+    {
+      "id": "enter_password",
+      "type": "type_text",
+      "text": "{{password}}",
+      "interval_ms": 15,
+      "comment": "Supply the value per run via the REST API's variables object; never commit it into the flow."
+    },
+    {
+      "id": "submit",
+      "type": "click",
+      "target": {
+        "kind": "ocr",
+        "text": "Login",
+        "match": "exact",
+        "retry": { "times": 5, "interval_ms": 600 }
+      },
+      "button": "left"
+    },
+    {
+      "id": "await_dashboard",
+      "type": "ocr_find",
+      "text": "Dashboard",
+      "match": "contains",
+      "retry": { "times": 20, "interval_ms": 1000 },
+      "save_to_var": "dashboard",
+      "comment": "Polls for up to 20 seconds; a login round trip can be slow."
+    },
+    {
+      "id": "handle_failure",
+      "type": "if",
+      "condition": {
+        "kind": "var_equals",
+        "variable": "dashboard_found",
+        "value": "false"
+      },
+      "then_steps": [
+        {
+          "id": "capture_failure",
+          "type": "screenshot",
+          "path": "out/login-failed.png",
+          "comment": "Capture the state so a failed unattended run is diagnosable after the fact."
+        }
+      ]
+    }
+  ]
+}

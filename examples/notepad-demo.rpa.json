@@ -1,0 +1,43 @@
+{
+  "name": "notepad-demo",
+  "version": 1,
+  "description": "Smoke test for the executor: activate Notepad, type a line, save with Ctrl+S. Uses no OCR or template targets, so it runs without the vision module.",
+  "variables": {
+    "message": "RPA-Block smoke test"
+  },
+  "steps": [
+    {
+      "id": "focus_notepad",
+      "type": "window_activate",
+      "title_match": "Notepad",
+      "match": "contains",
+      "comment": "Bring Notepad forward so the keystrokes land in it rather than whatever happened to be focused."
+    },
+    {
+      "id": "settle",
+      "type": "wait",
+      "ms": 400,
+      "comment": "Give the window manager a moment to finish the focus change."
+    },
+    {
+      "id": "type_message",
+      "type": "type_text",
+      "text": "{{message}}",
+      "interval_ms": 10,
+      "comment": "The interval keeps slower editors from dropping characters."
+    },
+    {
+      "id": "save",
+      "type": "key_press",
+      "keys": "ctrl+s",
+      "on_fail": "continue",
+      "comment": "An unsaved buffer opens a Save dialog here; continue either way so the smoke test still reports the typing result."
+    },
+    {
+      "id": "evidence",
+      "type": "screenshot",
+      "path": "out/notepad-demo.png",
+      "comment": "Proof of what the screen looked like at the end of the run."
+    }
+  ]
+}

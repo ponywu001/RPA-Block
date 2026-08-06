@@ -1,0 +1,43 @@
+# Build output
+build/
+build-full/
+out/
+cmake-build-*/
+
+# Packaged single-file exe
+dist/
+
+# MSVC / VS
+.vs/
+*.pdb
+*.ilk
+*.obj
+*.exp
+
+# Qt
+*_qmlcache.qrc
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+
+# OCR models — 20 MB of weights, downloaded by fetch-deps.ps1 rather than
+# committed. NOTICE.txt is the exception: it records where they came from and
+# under what licence, which has to travel with the source.
+models/*
+!models/NOTICE.txt
+*.onnx
+
+# Runtime artefacts produced by a run or a recording session
+recordings/
+published/
+runs.jsonl
+assets/*.png
+
+# Dependency-fetch tooling log
+aqtinstall.log
+
+# Editor noise
+.idea/
+*.user
+*.swp
+.DS_Store

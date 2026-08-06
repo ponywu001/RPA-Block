@@ -1,0 +1,33 @@
+// The single-file package is this stub, so this is the icon the user actually
+// sees: on the downloaded file, on the desktop, on a pinned shortcut. Giving the
+// icon only to rpa-studio.exe would leave the one exe anybody double-clicks
+// showing the generic Windows default.
+#define IDI_APPICON 101
+
+IDI_APPICON ICON "../rpa-studio/resources/app.ico"
+
+1 VERSIONINFO
+FILEVERSION     0,1,0,0
+PRODUCTVERSION  0,1,0,0
+FILEOS          0x4L
+FILETYPE        0x1L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040404b0"
+        BEGIN
+            VALUE "CompanyName",      "SuChenAI"
+            VALUE "FileDescription",  "RPA-Block"
+            VALUE "FileVersion",      "0.1.0.0"
+            VALUE "InternalName",     "RPA-Block"
+            VALUE "OriginalFilename", "RPA-Block.exe"
+            VALUE "ProductName",      "RPA-Block"
+            VALUE "ProductVersion",   "0.1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        // 0x404 = zh-TW, 0x4b0 = Unicode
+        VALUE "Translation", 0x404, 0x4b0
+    END
+END

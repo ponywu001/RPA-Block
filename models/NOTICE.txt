@@ -1,0 +1,79 @@
+Bundled OCR models
+==================
+
+det.onnx   PP-OCRv5_mobile_det   text detection        (~4.6 MB)
+rec.onnx   PP-OCRv5_mobile_rec   text recognition      (~15.8 MB)
+keys.txt   ppocrv5_dict.txt      character dictionary, 18383 entries
+
+PP-OCRv5 uses one unified charset covering Traditional and Simplified Chinese,
+Japanese, Latin letters, digits and punctuation, which is why it is bundled here
+rather than the more common PP-OCRv4 Chinese model: PP-OCRv4 ships
+ppocr_keys_v1.txt, a 6623-entry simplified-oriented charset that omits
+characters this application's own interface uses. Measured on a screenshot of
+that interface, v4 read "刪除積木" as "刪除猜木" and "整個流程" as "整固流程",
+because 積 is simply not in its dictionary. v5 reads both correctly.
+
+Origin
+------
+
+Upstream project, and the authoritative source of the weights:
+    PaddleOCR, https://github.com/PaddlePaddle/PaddleOCR
+
+Official model cards (Paddle inference format):
+    https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det
+    https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_rec
+
+The official releases are Paddle format (inference.json + inference.pdiparams),
+not ONNX. The files here are a community ONNX export of those same models:
+    https://huggingface.co/nathanfhh/PaddleOCR-ONNX
+
+Character dictionary, from the same export; identical to PaddleOCR's
+ppocrv5_dict.txt.
+
+If you would rather not rely on a third-party conversion, convert the official
+Paddle models yourself with paddle2onnx and drop the results in a folder of your
+own -- see "Replacing them" below. Nothing in the application depends on these
+particular files.
+
+License
+-------
+
+PaddleOCR and its released models are licensed under the Apache License,
+Version 2.0.
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+The weights are redistributed unmodified apart from the ONNX conversion and the
+file names this application expects (det.onnx / rec.onnx / keys.txt).
+
+Replacing them
+--------------
+
+Point "Settings -> Vision engine -> OCR model folder" at a directory containing
+det.onnx, rec.onnx and keys.txt. A configured folder always wins over these
+bundled files, so a language-specific recognition model can be dropped in
+without touching the install.
+
+The dictionary must belong to the recognition model. The loader compares the
+model's class count against the dictionary size and refuses to load on a
+mismatch, because a mismatched pair still decodes -- into confident-looking
+nonsense rather than an error.
+
+Known gaps
+----------
+
+No space is emitted between Chinese characters and an adjacent number
+("使用者名稱 8420" reads as "使用者名稱8420"). This is how the model was
+trained.
+
+Icons adjacent to text are read as characters and joined to the line. A
+magnifier icon becomes "Q", so the Windows search box reads as "Q 搜尋" rather
+than "搜尋".
+
+Both are why OCR targets default to the "contains" match mode. Use "exact" only
+when a substring would be ambiguous, and expect to check what was actually read:
+
+    rpa-cli ocr screen.png --find 搜尋 --match exact
+
+prints every recognised line and, when the target does not match, names the
+closest ones.

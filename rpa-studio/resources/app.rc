@@ -1,0 +1,33 @@
+// Windows resource script. The first icon in the file is what Explorer, the
+// taskbar and Alt+Tab use for the executable itself -- setWindowIcon only
+// affects windows the process has already created, so without this the exe shows
+// the generic default in the file manager and on a pinned shortcut.
+#define IDI_APPICON 101
+
+IDI_APPICON ICON "app.ico"
+
+1 VERSIONINFO
+FILEVERSION     0,1,0,0
+PRODUCTVERSION  0,1,0,0
+FILEOS          0x4L
+FILETYPE        0x1L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040404b0"
+        BEGIN
+            VALUE "CompanyName",      "SuChenAI"
+            VALUE "FileDescription",  "RPA-Block"
+            VALUE "FileVersion",      "0.1.0.0"
+            VALUE "InternalName",     "rpa-studio"
+            VALUE "OriginalFilename", "rpa-studio.exe"
+            VALUE "ProductName",      "RPA-Block"
+            VALUE "ProductVersion",   "0.1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        // 0x404 = zh-TW, 0x4b0 = Unicode
+        VALUE "Translation", 0x404, 0x4b0
+    END
+END
