@@ -111,6 +111,7 @@ private:
     StepOutcome doWindowActivate(const Step& step);
     StepOutcome doScreenshot(const Step& step);
     StepOutcome doHttpRequest(const Step& step);
+    StepOutcome doLaunchApp(const Step& step);
 
     /// Retry wrapper shared by every locating step and by click targets.
     LocateResult locateWithRetry(const Target& target);

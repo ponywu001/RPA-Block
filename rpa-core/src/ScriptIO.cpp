@@ -79,10 +79,14 @@ Target parseTarget(const json& j) {
     const std::string kind = getString(j, "kind", "point");
     if (kind == "ocr") t.kind = TargetKind::Ocr;
     else if (kind == "image") t.kind = TargetKind::Image;
+    else if (kind == "relative") t.kind = TargetKind::Relative;
     else t.kind = TargetKind::Point;
 
     t.text = getString(j, "text");
     parseMatchMode(getString(j, "match", "exact"), t.match);
+    parseDirection(getString(j, "direction", "right"), t.direction);
+    parseElementRole(getString(j, "element", "input"), t.role);
+    t.maxDistance = getInt(j, "max_distance", t.maxDistance);
     t.templatePath = getString(j, "template");
     t.threshold = getDouble(j, "threshold", t.threshold);
     t.point.x = getInt(j, "x", 0);
@@ -118,6 +122,14 @@ json dumpTarget(const Target& t) {
             j["kind"] = "point";
             j["x"] = t.point.x;
             j["y"] = t.point.y;
+            break;
+        case TargetKind::Relative:
+            j["kind"] = "relative";
+            j["text"] = t.text;
+            j["match"] = toString(t.match);
+            j["direction"] = toString(t.direction);
+            j["element"] = toString(t.role);
+            j["max_distance"] = t.maxDistance;
             break;
     }
     if (t.offsetX != 0) j["offset_x"] = t.offsetX;
@@ -212,6 +224,8 @@ void applyStepFields(const json& j, Step& step) {
     step.titleMatch = getString(j, "title_match");
     parseMatchMode(getString(j, "match", "contains"), step.titleMatchMode);
     step.path = getString(j, "path");
+    step.launchArgs = getString(j, "args");
+    step.workingDir = getString(j, "working_dir");
 
     auto condition = j.find("condition");
     if (condition != j.end() && condition->is_object()) {
@@ -348,6 +362,11 @@ json dumpStep(const Step& step) {
             if (!step.headers.empty()) j["headers"] = step.headers;
             if (!step.body.empty()) j["body"] = step.body;
             if (!step.saveToVar.empty()) j["save_to_var"] = step.saveToVar;
+            break;
+        case StepType::LaunchApp:
+            j["path"] = step.path;
+            if (!step.launchArgs.empty()) j["args"] = step.launchArgs;
+            if (!step.workingDir.empty()) j["working_dir"] = step.workingDir;
             break;
     }
 

@@ -42,6 +42,13 @@ public:
 private:
     core::LocateResult locateByText(const core::Target& target);
     core::LocateResult locateByTemplate(const core::Target& target);
+    /// "The box beside this label", worked out from pixels.
+    ///
+    /// Only reached when UI Automation could not answer -- remote desktops,
+    /// Citrix, canvas-drawn interfaces, anything that shows an application
+    /// without exposing one. There is no control tree to consult, so the anchor
+    /// comes from OCR and the field itself has to be found as a rectangle.
+    core::LocateResult locateRelative(const core::Target& target);
     std::string resolvePath(const std::string& path) const;
 
     mutable std::mutex mutex_;

@@ -39,6 +39,9 @@ json dumpRecord(const RunRecord& record) {
     if (!record.failedStepId.empty()) j["failed_step"] = record.failedStepId;
     if (!record.error.empty()) j["error"] = record.error;
     if (!record.variables.empty()) j["variables"] = record.variables;
+    if (!record.failureScreenshotPath.empty()) {
+        j["failure_screenshot"] = record.failureScreenshotPath;
+    }
     return j;
 }
 
@@ -108,7 +111,9 @@ void RunStore::setCurrentStep(const std::string& runId, const std::string& stepI
     }
 }
 
-void RunStore::complete(const std::string& runId, const core::RunResult& result) {
+void RunStore::complete(const std::string& runId,
+                        const core::RunResult& result,
+                        const std::string& failureScreenshotPath) {
     RunRecord snapshot;
     bool found = false;
 
@@ -119,6 +124,7 @@ void RunStore::complete(const std::string& runId, const core::RunResult& result)
             record.status = result.status;
             record.failedStepId = result.failedStepId;
             record.error = result.error;
+            record.failureScreenshotPath = failureScreenshotPath;
             record.stepsExecuted = result.stepsExecuted;
             record.currentStepId.clear();
             record.finishedAt = std::chrono::system_clock::now();
@@ -217,6 +223,7 @@ void RunStore::loadFromDisk() {
         record.currentStepId = j.value("current_step", "");
         record.failedStepId = j.value("failed_step", "");
         record.error = j.value("error", "");
+        record.failureScreenshotPath = j.value("failure_screenshot", "");
         record.stepsExecuted = j.value("steps_executed", 0);
 
         const std::string status = j.value("status", "succeeded");

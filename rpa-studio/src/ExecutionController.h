@@ -13,6 +13,19 @@
 
 namespace rpa::studio {
 
+/// Everything a finished run leaves behind.
+///
+/// The script travels with the outcome rather than being read back from the
+/// editor afterwards: a run started over REST can finish while the user has an
+/// entirely different flow open, and the diagnosis has to describe what ran.
+struct RunOutcome {
+    QString runId;
+    core::RunResult result;
+    core::Script script;
+    /// Empty unless the run failed and the capture succeeded.
+    QString failureScreenshotPath;
+};
+
 /// Owns the executor and runs it off the UI thread.
 ///
 /// The executor blocks — a flow with waits and retries can run for minutes — so
@@ -32,6 +45,9 @@ public:
                      core::ITargetLocator* locator);
     void setWorkingDirectory(const QString& directory);
     void setStepDelayMs(int delayMs);
+    /// Where to drop a screenshot of the screen a failing run left behind.
+    /// Empty disables the capture.
+    void setFailureScreenshotDirectory(const QString& directory);
 
     /// Begin a run. Returns false with a reason when one is already in flight.
     bool start(const core::Script& script,
@@ -56,7 +72,7 @@ signals:
     void stepStarted(const QString& stepId);
     void stepFinished(const QString& stepId, bool ok, const QString& error);
     void logged(int level, const QString& stepId, const QString& message);
-    void runFinished(const QString& runId, rpa::core::RunResult result);
+    void runFinished(const rpa::studio::RunOutcome& outcome);
 
 private:
     void joinWorker();
@@ -72,6 +88,7 @@ private:
     mutable std::mutex stateMutex_;
     QString activeRunId_;
     QString workingDirectory_;
+    QString failureScreenshotDirectory_;
     int stepDelayMs_ = 0;
 };
 
@@ -79,3 +96,4 @@ private:
 
 Q_DECLARE_METATYPE(rpa::core::RunStatus)
 Q_DECLARE_METATYPE(rpa::core::RunResult)
+Q_DECLARE_METATYPE(rpa::studio::RunOutcome)

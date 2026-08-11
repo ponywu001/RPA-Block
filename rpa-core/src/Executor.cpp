@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "rpa/core/Http.h"
+#include "rpa/core/Process.h"
 
 namespace rpa::core {
 
@@ -285,6 +286,37 @@ StepOutcome Executor::doHttpRequest(const Step& step) {
     return outcome;
 }
 
+StepOutcome Executor::doLaunchApp(const Step& step) {
+    StepOutcome outcome;
+
+    const std::string path = vars_.expand(step.path);
+    if (path.empty()) {
+        outcome.error = "launch_app has no path";
+        return outcome;
+    }
+
+    // An unset working directory falls back to the flow's own directory, so a
+    // relative `path` resolves the same way template and screenshot paths do
+    // rather than against whatever the host process happens to be sitting in.
+    std::string directory = vars_.expand(step.workingDir);
+    if (directory.empty()) directory = config_.workingDirectory;
+
+    const LaunchResult launched =
+        launchApplication(path, vars_.expand(step.launchArgs), directory);
+    if (!launched.ok) {
+        outcome.error = launched.error.empty() ? "cannot launch: " + path : launched.error;
+        return outcome;
+    }
+
+    if (launched.processId != 0) {
+        vars_.set("last_launch_pid", std::to_string(launched.processId));
+    }
+    log(LogLevel::Info, step.id, "launched " + path);
+
+    outcome.ok = true;
+    return outcome;
+}
+
 StepOutcome Executor::executeStep(const Step& step, FlowSignal& signal, RunResult& result) {
     StepOutcome outcome;
 
@@ -322,6 +354,9 @@ StepOutcome Executor::executeStep(const Step& step, FlowSignal& signal, RunResul
             break;
         case StepType::HttpRequest:
             outcome = doHttpRequest(step);
+            break;
+        case StepType::LaunchApp:
+            outcome = doLaunchApp(step);
             break;
         case StepType::If: {
             const bool taken = step.condition ? evaluate(*step.condition) : false;

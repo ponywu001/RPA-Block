@@ -170,7 +170,7 @@ RPA_TEST(step_type_enum_covers_exactly_the_ir_step_types) {
 
     // And the other direction: a step type the schema omits is one the
     // assistant can never produce.
-    for (int i = 0; i <= static_cast<int>(core::StepType::HttpRequest); ++i) {
+    for (int i = 0; i < core::kStepTypeCount; ++i) {
         const std::string name = core::toString(static_cast<core::StepType>(i));
         if (declared.find(name) == declared.end()) {
             ::rpa::test::fail(__FILE__, __LINE__,
@@ -184,7 +184,7 @@ RPA_TEST(system_prompt_documents_every_step_type) {
     CHECK(!prompt.empty());
 
     // The model only knows a step's parameter shape if the prompt spells it out.
-    for (int i = 0; i <= static_cast<int>(core::StepType::HttpRequest); ++i) {
+    for (int i = 0; i < core::kStepTypeCount; ++i) {
         const std::string name = core::toString(static_cast<core::StepType>(i));
         if (prompt.find(name) == std::string::npos) {
             ::rpa::test::fail(__FILE__, __LINE__,
@@ -271,6 +271,8 @@ RPA_TEST(schema_step_round_trips_through_the_ir_for_every_step_type) {
         {"loop", R"({"count":3,"steps":[{"id":"l","type":"wait","ms":1}]})"},
         {"http_request",
          R"({"method":"POST","url":"https://example.com/h","headers":{"A":"b"},"body":"{}","save_to_var":"r"})"},
+        {"launch_app",
+         R"({"path":"C:\\Windows\\notepad.exe","args":"notes.txt","working_dir":"C:\\Temp"})"},
     };
 
     for (const auto& sample : samples) {
@@ -306,4 +308,49 @@ RPA_TEST(nested_bodies_survive_the_params_json_indirection) {
     CHECK(step.loopSteps[0].type == core::StepType::If);
     CHECK_EQ(step.loopSteps[0].thenSteps.size(), size_t{1});
     CHECK_EQ(step.loopSteps[0].thenSteps[0].keys, std::string{"enter"});
+}
+
+RPA_TEST(every_target_kind_the_ir_accepts_is_documented_in_the_prompt) {
+    // Same contract as the step-type check above, for the shape one level down.
+    // A target kind the parser accepts but the prompt never mentions is one the
+    // assistant will never produce; the reverse is one it produces and the
+    // client can only reject. Both drifts are invisible in a live request.
+    const std::string prompt = rpa::ai::rpaSystemPrompt();
+
+    for (const char* kind : {"ocr", "image", "relative", "point"}) {
+        const std::string quoted = std::string("\"kind\": \"") + kind + "\"";
+        CHECK(prompt.find(quoted) != std::string::npos);
+
+        rpa::core::Step step;
+        std::string error;
+        const std::string params =
+            std::string(R"({"target": {"kind": ")") + kind +
+            R"(", "text": "x", "template": "t.png", "x": 1, "y": 2}})";
+        CHECK(rpa::core::parseStepFromParamsJson("s1", "click", params, "", step, error));
+    }
+}
+
+RPA_TEST(the_prompt_names_every_direction_and_element_role) {
+    // These are literal_str-style vocabularies: a value the prompt offers that
+    // parseDirection does not accept would be silently rewritten to "right",
+    // pointing the step at the wrong side of the form.
+    const std::string prompt = rpa::ai::rpaSystemPrompt();
+
+    for (int i = 0; i < 4; ++i) {
+        const std::string direction = rpa::core::toString(static_cast<rpa::core::Direction>(i));
+        CHECK(prompt.find(direction) != std::string::npos);
+    }
+    for (int i = 0; i < 4; ++i) {
+        const std::string role = rpa::core::toString(static_cast<rpa::core::ElementRole>(i));
+        CHECK(prompt.find(role) != std::string::npos);
+    }
+}
+
+RPA_TEST(the_prompt_steers_away_from_pixel_offsets_for_form_fields) {
+    // The rule this guards is the whole reason relative targets exist. Without
+    // it the assistant reaches for offset_x, which works on the machine it was
+    // written on and quietly clicks the wrong thing everywhere else.
+    const std::string prompt = rpa::ai::rpaSystemPrompt();
+    CHECK(prompt.find("relative target anchored on its label") != std::string::npos);
+    CHECK(prompt.find("offset_x") != std::string::npos);
 }

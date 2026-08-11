@@ -4,6 +4,7 @@
 #include <QString>
 #include <QStringList>
 
+#include "TunnelController.h"
 #include "rpa/ai/AgentTypes.h"
 #include "rpa/server/ApiServer.h"
 #include "rpa/vision/OcrEngine.h"
@@ -42,6 +43,26 @@ struct AppSettings {
     QString publishDirectory;
     QString runHistoryPath;
 
+    // Public tunnel. Tokens are credentials and live in the OS store, not here.
+    //
+    // Auto-start defaults off and has to be turned on deliberately: it means
+    // this machine puts itself on the internet every time the app launches,
+    // which is right for a box that is meant to stay reachable and wrong for a
+    // desktop somebody happens to be working at.
+    bool tunnelAutoStart = false;
+    TunnelProvider tunnelProvider = TunnelProvider::Ngrok;
+    /// Kept per provider so switching between them does not discard the other
+    /// one's setup and make the user find the path again.
+    QString ngrokBinaryPath;
+    QString cloudflaredBinaryPath;
+    /// ngrok: an optional reserved domain. Cloudflare: the required public
+    /// hostname configured in the dashboard.
+    QString ngrokDomain;
+    QString cloudflareHostname;
+
+    QString tunnelBinaryPath() const;
+    QString tunnelHostname() const;
+
     // Recorder
     int clickCaptureRadius = 120;
     bool captureElementInfo = true;
@@ -64,6 +85,16 @@ struct AppSettings {
     /// Credentials, read from and written to the OS credential store.
     QString aiSecret() const;
     void setAiSecret(const QString& secret) const;
+
+    /// The token for the selected provider. Stored under a per-provider target
+    /// so switching does not overwrite the other's.
+    QString tunnelAuthToken() const;
+    void setTunnelAuthToken(const QString& token) const;
+    QString tunnelAuthToken(TunnelProvider which) const;
+    void setTunnelAuthToken(TunnelProvider which, const QString& token) const;
+
+    /// Everything TunnelController needs, assembled from the selected provider.
+    TunnelConfig toTunnelConfig(int port) const;
 
     ai::AgentSettings toAgentSettings() const;
     vision::OcrConfig toOcrConfig() const;

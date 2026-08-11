@@ -11,6 +11,7 @@
 class QCheckBox;
 class QComboBox;
 class QLabel;
+class QLineEdit;
 class QListWidget;
 class QPushButton;
 class QSpinBox;
@@ -18,6 +19,8 @@ class QTableWidget;
 class QTimer;
 
 namespace rpa::studio {
+
+class TunnelController;
 
 /// Screen 4: start/stop the REST server, manage keys, published flows, history.
 class ApiPanelDialog : public QDialog {
@@ -28,6 +31,7 @@ public:
                    server::ApiServer* api,
                    server::ScriptRepository* repository,
                    server::RunStore* runStore,
+                   TunnelController* tunnel,
                    QWidget* parent = nullptr);
 
 signals:
@@ -53,6 +57,11 @@ private:
     void copyPowerShellForSelectedScript();
     void unpublishSelectedScript();
     void refreshStatus();
+    void toggleTunnel();
+    void browseForTunnelBinary();
+    void refreshTunnel();
+    /// Re-label the provider-specific fields and reload their saved values.
+    void applyTunnelProvider();
     void refreshKeys();
     void refreshScripts();
     void refreshRuns();
@@ -76,12 +85,25 @@ private:
     /// The flow on the canvas, for the staleness comparison.
     core::Script currentFlow_;
     server::RunStore* runStore_;
+    TunnelController* tunnel_;
 
     QLabel* statusLabel_;
     QPushButton* toggleButton_;
     QComboBox* bindCombo_;
     QSpinBox* portSpin_;
     QCheckBox* autoStartCheck_;
+
+    QLabel* tunnelStatusLabel_;
+    QPushButton* tunnelButton_;
+    QComboBox* tunnelProviderCombo_;
+    QLineEdit* tunnelTokenEdit_;
+    QLabel* tunnelHostnameLabel_;
+    QLineEdit* tunnelHostnameEdit_;
+    QLineEdit* tunnelBinaryEdit_;
+    QCheckBox* tunnelAutoStartCheck_;
+    QPushButton* tunnelCopyUrlButton_;
+    QPushButton* tunnelDownloadButton_;
+    QLabel* tunnelNote_;
 
     QListWidget* keyList_;
     QListWidget* scriptList_;

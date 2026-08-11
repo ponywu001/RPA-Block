@@ -333,3 +333,95 @@ RPA_TEST(single_step_execution_advances_one_step_only) {
     const StepOutcome outOfRange = f.executor.runSingleStep(script, 99);
     CHECK(!outOfRange.ok);
 }
+
+namespace {
+
+/// Locator that reports a fixed outcome, for exercising CompositeLocator's
+/// ordering and its error aggregation.
+class ScriptedLocator : public rpa::core::ITargetLocator {
+public:
+    ScriptedLocator(bool succeeds, std::string reason)
+        : succeeds_(succeeds), reason_(std::move(reason)) {}
+
+    rpa::core::LocateResult locate(const rpa::core::Target&) override {
+        ++calls;
+        rpa::core::LocateResult result;
+        if (succeeds_) {
+            result.found = true;
+            result.point = rpa::core::Point{7, 9};
+            result.matchedText = reason_;
+        } else {
+            result.error = reason_;
+        }
+        return result;
+    }
+
+    bool captureToFile(const std::string&,
+                       const std::optional<rpa::core::Rect>&,
+                       std::string& error) override {
+        error = reason_;
+        return succeeds_;
+    }
+
+    int calls = 0;
+
+private:
+    bool succeeds_;
+    std::string reason_;
+};
+
+}  // namespace
+
+RPA_TEST(composite_locator_returns_the_first_hit_and_stops) {
+    ScriptedLocator first(true, "uia");
+    ScriptedLocator second(true, "vision");
+
+    rpa::core::CompositeLocator composite;
+    composite.addBackend(&first);
+    composite.addBackend(&second);
+
+    const auto result = composite.locate(rpa::core::Target{});
+    CHECK(result.found);
+    CHECK_EQ(result.matchedText, std::string("uia"));
+    // The expensive backend is never reached when the cheap one answers.
+    CHECK_EQ(second.calls, 0);
+}
+
+RPA_TEST(composite_locator_falls_through_to_the_next_backend) {
+    ScriptedLocator first(false, "no such control");
+    ScriptedLocator second(true, "vision");
+
+    rpa::core::CompositeLocator composite;
+    composite.addBackend(&first);
+    composite.addBackend(&second);
+
+    const auto result = composite.locate(rpa::core::Target{});
+    CHECK(result.found);
+    CHECK_EQ(result.matchedText, std::string("vision"));
+}
+
+RPA_TEST(composite_locator_reports_every_reason_it_failed) {
+    // Both reasons matter: "the app exposes no controls" and "the label was
+    // never on screen" are different problems with different fixes, and only
+    // keeping the last one would hide whichever came first.
+    ScriptedLocator first(false, "uia saw no Edit controls");
+    ScriptedLocator second(false, "ocr never matched the label");
+
+    rpa::core::CompositeLocator composite;
+    composite.addBackend(&first);
+    composite.addBackend(&second);
+
+    const auto result = composite.locate(rpa::core::Target{});
+    CHECK(!result.found);
+    CHECK(result.error.find("uia saw no Edit controls") != std::string::npos);
+    CHECK(result.error.find("ocr never matched the label") != std::string::npos);
+}
+
+RPA_TEST(composite_locator_with_no_backends_says_so) {
+    rpa::core::CompositeLocator composite;
+    composite.addBackend(nullptr);
+
+    const auto result = composite.locate(rpa::core::Target{});
+    CHECK(!result.found);
+    CHECK(!result.error.empty());
+}

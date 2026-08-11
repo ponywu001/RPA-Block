@@ -49,6 +49,7 @@ RPA-Block 是一套桌面應用程式，讓使用者以「低程式碼」方式�
 | FR-2.2 | `image_find` 步驟：OpenCV `matchTemplate` 依模板圖定位 | 相似度門檻可調（預設 0.85），支援多尺度比對 |
 | FR-2.3 | 目標選取器：全螢幕截圖 overlay，框選區域後即時顯示 OCR 結果或存成模板圖 | 見 wireframe 畫面 3 |
 | FR-2.4 | 兩種定位皆支援 `offset_x` / `offset_y`（相對命中中心的點擊偏移） | 例：找到「登入」文字後點擊其右方 80px 的按鈕 |
+| FR-2.7 | `relative` 目標：以標籤為錨點指定方位與控制項種類 | 兩級退化：先比對控制項自身名稱（零座標），再以標籤幾何關係推算；候選須在垂直或水平方向與錨點重疊，避免選到鄰列欄位；失敗須區分「錨點不存在／該種控制項未暴露／方向範圍內無物」 |
 | FR-2.5 | 找不到目標時依步驟設定：重試（次數＋間隔）→ 逾時後失敗或走 `on_fail` 分支 | 預設重試 3 次、間隔 1s |
 | FR-2.6 | 搜尋範圍可限定：全螢幕 / 指定視窗 / 指定矩形區域 | 縮小範圍以提升速度與準確度 |
 
@@ -61,6 +62,12 @@ RPA-Block 是一套桌面應用程式，讓使用者以「低程式碼」方式�
 | FR-3.3 | API key 認證（`X-API-Key` header），可於面板產生 / 撤銷多把 key | 無效 key 回 401 |
 | FR-3.4 | 觸發執行為非同步：回 `run_id`，以查詢端點取得狀態 / 結果 | 同一時間僅允許一個流程執行（桌面獨占），排隊或回 409 可設定 |
 | FR-3.5 | 執行歷史保留於本地（SQLite 或 JSON lines），面板可查看 | 含觸發來源、起訖時間、結果、失敗步驟 |
+| FR-3.6 | 流程失敗時自動擷取當下畫面存於本地，執行歷史記錄其路徑 | API 回報路徑而非提供下載：截圖為整個桌面，可能含無關資訊 |
+| FR-3.7 | 可選的對外通道，支援 ngrok 與 Cloudflare Tunnel，使用者自備 token | agent 不隨程式散布（ngrok 條款限制）；**token 為必填，未填不得開啟**；token 依供應者分開存於 Credential Manager 並以環境變數傳遞（不進命令列）；需明確確認且無 API 金鑰時不得開啟；開啟時主視窗常駐警示 |
+| FR-3.11 | 通道連上後驗證公開網址確實連回本機 | Cloudflare token 模式的本機位址在後台設定，指錯時通道會連上但完全不通且不報錯；驗證失敗僅警告，不關閉通道 |
+| FR-3.8 | API 金鑰以作業系統亂數源產生 | 不得以 PRNG 加種子產生：種子熵會成為金鑰實際強度的上限 |
+| FR-3.9 | 認證失敗速率限制 | 60 秒內逾 10 次失敗後，失敗請求回 `429` + `Retry-After`；僅計失敗且僅擋失敗，持有效金鑰者不受影響（否則成為對擁有者的阻斷手段）|
+| FR-3.10 | 通道可設定自動開啟與斷線重連 | 供長期掛於外網的機器；預設關閉；無 API 金鑰時不自動開啟；手動關閉須一併取消待重連 |
 
 ### FR-4 AI 聊天生成 RPA
 
@@ -71,6 +78,8 @@ RPA-Block 是一套桌面應用程式，讓使用者以「低程式碼」方式�
 | FR-4.3 | 傳送時自動附帶脈絡：目前流程 IR、（可選）目前螢幕截圖 data URI | 使用者可勾選是否附截圖 |
 | FR-4.4 | AI 輸出以 `output_schema` 強制為合法 RPA IR（見 §4），不解析自由文字 | `structured_output` 直接反序列化為流程 |
 | FR-4.5 | SSE 串流顯示進度；逾時（預設 120s）與失敗可重試 | 顯示 `usage_cost` 供成本追蹤 |
+| FR-4.6 | 草稿有步驟驗證不過時，自動連同錯誤送回 AI 修正，上限 2 次 | 目標使用者無法手改 `params_json`；連續兩次錯誤相同即停止（未收斂），每輪成本累加顯示 |
+| FR-4.7 | 執行失敗後可一鍵請 AI 診斷 | 送出失敗步驟、錯誤、流程 IR、日誌尾段與失敗當下截圖；回覆走 FR-4.2 的預覽／套用閘門 |
 
 ### FR-5 錄製轉 AI 生成
 
@@ -111,6 +120,7 @@ RPA-Block 是一套桌面應用程式，讓使用者以「低程式碼」方式�
 | `wait` | `ms` | 固定等待 |
 | `ocr_find` | `text`, `match`(exact/contains/regex), `region?`, `offset_x?`, `offset_y?`, `retry?` | OCR 文字錨點定位，結果存入內建變數 `last_match` |
 | `image_find` | `template`（相對專案的圖檔路徑）, `threshold`(0–1), `region?`, `offset_x?`, `offset_y?`, `retry?` | OpenCV 模板比對定位 |
+| `launch_app` | `path`, `args?`, `working_dir?` | 開啟應用程式。`path` 也可以是文件、資料夾或網址（走系統關聯），支援 `%ENV%` 展開；只負責啟動，不等程式結束。啟動成功時把 PID 寫入內建變數 `last_launch_pid` |
 | `window_activate` | `title_match`, `match`(exact/contains/regex) | 啟用指定視窗 |
 | `screenshot` | `path`, `region?` | 截圖存檔 |
 | `if` | `condition`（`ocr_found` / `image_found` / `var_equals`…）, `then_steps`, `else_steps?` | 條件分支 |
@@ -176,7 +186,7 @@ RPA-Block 是一套桌面應用程式，讓使用者以「低程式碼」方式�
           { "key": "type", "value": { "type": "literal_str",
             "values": ["click","double_click","type_text","key_press","wait",
                         "ocr_find","image_find","window_activate","screenshot",
-                        "if","loop","http_request"] } },
+                        "if","loop","http_request","launch_app"] } },
           { "key": "params_json", "key_description": "該步驟參數，序列化為 JSON 字串",
             "value": { "type": "str" } },
           { "key": "comment", "value": { "type": "str", "optional": true } }

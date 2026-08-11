@@ -11,10 +11,12 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include <QScreen>
 #include <QScrollArea>
 #include <QShortcut>
@@ -39,6 +41,7 @@
 #include "RecordingDialogs.h"
 #include "SettingsDialog.h"
 #include "TargetPickerOverlay.h"
+#include "TunnelController.h"
 #include "rpa/ai/PromptBuilder.h"
 #include "rpa/core/ScriptIO.h"
 #include "rpa/vision/ScreenCapture.h"
@@ -51,6 +54,32 @@ namespace {
 /// target picker freezes the screen. Long enough that the editor is really gone
 /// from the capture, short enough not to feel like a stall.
 constexpr int kUncoverDelayMs = 200;
+
+/// Say what to do about an HTTP failure, in the terms the person in front of
+/// the app can act on.
+///
+/// The gateway answers 401 and 404 with an HTML error page, so there is no
+/// server-supplied reason to quote -- the transport's own wording ("Host
+/// requires authentication") names the protocol, not the thing the user got
+/// wrong. Empty for statuses with nothing useful to add.
+QString adviceForHttpStatus(int status) {
+    switch (status) {
+        case 401:
+        case 403:
+            return QStringLiteral("→ 金鑰不正確或已失效。請到「工具 → 設定 → AI 助手」重新填入。");
+        case 404:
+            return QStringLiteral("→ 找不到這個 AI 服務位址。請確認設定裡的「gateway 網址」。");
+        case 429:
+            return QStringLiteral("→ 請求太頻繁，稍等一下再試。");
+        case 0:
+            return QStringLiteral("→ 連不上 AI 服務。請確認網路，或設定裡的逾時秒數是否太短。");
+        default:
+            if (status >= 500) {
+                return QStringLiteral("→ AI 服務目前有問題，這不是你的流程的錯。稍後再試一次。");
+            }
+            return {};
+    }
+}
 
 }  // namespace
 
@@ -66,7 +95,46 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     loadSettings();
     wireSignals();
 
-    execution_.setBackends(input_.get(), windowBackend_.get(), &locator_);
+    // Which strategy resolved a relative target is worth seeing in the log: a
+    // step that used to match a control by name and has started falling back to
+    // geometry still works, but it is one layout change from not working.
+    uiaLocator_.setStrategyReporter([this](const std::string& note) {
+        QMetaObject::invokeMethod(
+            this,
+            [this, note] { appendLog(0, QString(), QString::fromStdString(note)); },
+            Qt::QueuedConnection);
+    });
+
+    resolvedLocator_.addBackend(&uiaLocator_);
+    resolvedLocator_.addBackend(&locator_);
+    execution_.setBackends(input_.get(), windowBackend_.get(), &resolvedLocator_);
+
+    tunnel_ = new TunnelController(this);
+    connect(tunnel_, &TunnelController::opened, this, [this](const QString& url) {
+        appendLog(2, QString(),
+                  QStringLiteral("對外通道已開啟：%1 —— 網際網路上持有 API 金鑰的人"
+                                 "都能操作這台電腦。")
+                      .arg(url));
+        updateActionStates();
+    });
+    connect(tunnel_, &TunnelController::closed, this, [this](const QString&) {
+        appendLog(1, QString(), QStringLiteral("對外通道已關閉。"));
+        updateActionStates();
+    });
+    connect(tunnel_, &TunnelController::failed, this, [this](const QString& reason) {
+        appendLog(3, QString(), QStringLiteral("對外通道開啟失敗：%1").arg(reason));
+        updateActionStates();
+    });
+    connect(tunnel_, &TunnelController::unreachable, this, [this](const QString& detail) {
+        appendLog(3, QString(), detail);
+    });
+    connect(tunnel_, &TunnelController::reconnecting, this, [this](int seconds, int attempt) {
+        appendLog(2, QString(),
+                  QStringLiteral("對外通道斷線，%1 秒後重連（第 %2 次嘗試）。")
+                      .arg(seconds)
+                      .arg(attempt));
+        updateActionStates();
+    });
 
     api_ = std::make_unique<server::ApiServer>(&repository_, &runStore_);
     api_->setRunHandler([this](const server::RunRequest& request, std::string& reason) {
@@ -303,10 +371,33 @@ void MainWindow::buildDocks() {
     // --- Bottom: log ------------------------------------------------------
     auto* logDock = new QDockWidget(QStringLiteral("執行紀錄"), this);
     logDock->setObjectName(QStringLiteral("logDock"));
-    log_ = new QPlainTextEdit(logDock);
+
+    auto* logPanel = new QWidget(logDock);
+    auto* logLayout = new QVBoxLayout(logPanel);
+    logLayout->setContentsMargins(0, 0, 0, 0);
+    logLayout->setSpacing(4);
+
+    // A failing flow leaves the user staring at an OCR anchor that did not
+    // match. Reading that log is a skill they do not have, so the log offers
+    // the one action they can take: hand the whole thing to the assistant.
+    askAiButton_ = new QPushButton(QStringLiteral("請 AI 看看哪裡出錯"), logPanel);
+    askAiButton_->setEnabled(false);
+    askAiButton_->setToolTip(
+        QStringLiteral("把失敗的步驟、錯誤訊息與流程送給 AI 診斷，並附上失敗當下的畫面截圖。"));
+    connect(askAiButton_, &QPushButton::clicked, this, &MainWindow::askAssistantAboutFailure);
+
+    auto* logHeader = new QHBoxLayout();
+    logHeader->setContentsMargins(6, 4, 6, 0);
+    logHeader->addWidget(askAiButton_);
+    logHeader->addStretch();
+    logLayout->addLayout(logHeader);
+
+    log_ = new QPlainTextEdit(logPanel);
     log_->setReadOnly(true);
     log_->setMaximumBlockCount(5000);
-    logDock->setWidget(log_);
+    logLayout->addWidget(log_);
+
+    logDock->setWidget(logPanel);
     addDockWidget(Qt::BottomDockWidgetArea, logDock);
     resizeDocks({logDock}, {150}, Qt::Vertical);
 
@@ -389,15 +480,24 @@ void MainWindow::wireSignals() {
             },
             Qt::QueuedConnection);
     connect(&execution_, &ExecutionController::runFinished, this,
-            [this](const QString& runId, core::RunResult result) {
-                runStore_.complete(runId.toStdString(), result);
+            [this](const RunOutcome& outcome) {
+                runStore_.complete(outcome.runId.toStdString(), outcome.result,
+                                   outcome.failureScreenshotPath.toStdString());
                 updateActionStates();
-                if (result.status == core::RunStatus::Failed) {
+
+                if (outcome.result.status == core::RunStatus::Failed) {
                     statusBar()->showMessage(
                         QStringLiteral("執行失敗，卡在步驟 %1：%2")
-                            .arg(QString::fromStdString(result.failedStepId),
-                                 QString::fromStdString(result.error)));
+                            .arg(QString::fromStdString(outcome.result.failedStepId),
+                                 QString::fromStdString(outcome.result.error)));
+
+                    lastFailure_ = FailureContext{outcome.script, outcome.result.failedStepId,
+                                                  outcome.result.error,
+                                                  outcome.failureScreenshotPath};
+                } else {
+                    lastFailure_.reset();
                 }
+                if (askAiButton_) askAiButton_->setEnabled(lastFailure_.has_value());
             },
             Qt::QueuedConnection);
 
@@ -407,6 +507,7 @@ void MainWindow::wireSignals() {
     connect(chat_, &ChatDock::applyDraftRequested, this, &MainWindow::applyAssistantDraft);
     connect(chat_, &ChatDock::cancelRequested, this, [this] {
         agent_->cancel();
+        repair_.reset();
         chat_->setBusy(false);
         chat_->appendSystemNote(QStringLiteral("已取消這次請求。"));
     });
@@ -414,8 +515,23 @@ void MainWindow::wireSignals() {
     connect(agent_, &ai::AgentClient::progress, this,
             [this](const QString& note) { statusBar()->showMessage(note); });
     connect(agent_, &ai::AgentClient::finished, this, [this](const ai::AgentReply& reply) {
+        // A draft with steps the IR rejects goes back to the assistant rather
+        // than to the user: the failures live inside JSON they cannot edit, so
+        // handing it over with a list of complaints is a dead end for them.
+        if (repair_ && repair_->shouldRepair(reply)) {
+            chat_->appendSystemNote(
+                QStringLiteral("草稿有 %1 個積木不合格式，正在請 AI 修正…（第 %2 次）")
+                    .arg(reply.stepIssues.size())
+                    .arg(repair_->attempts() + 1));
+            agent_->send(repair_->nextRequest(reply));
+            return;  // stays busy; this round never reaches the transcript
+        }
+
+        const ai::AgentReply shown = repair_ ? repair_->finalize(reply) : reply;
+        repair_.reset();
+
         chat_->setBusy(false);
-        chat_->appendAssistantReply(reply);
+        chat_->appendAssistantReply(shown);
 
         // A recording hand-off is a one-shot conversion, so its draft goes
         // straight to the preview rather than waiting for another click.
@@ -427,8 +543,13 @@ void MainWindow::wireSignals() {
     connect(agent_, &ai::AgentClient::failed, this, [this](const ai::AgentError& error) {
         chat_->setBusy(false);
         awaitingRecordingDraft_ = false;
-        chat_->appendSystemNote(QStringLiteral("AI 請求失敗：%1")
-                                    .arg(QString::fromStdString(error.message)));
+        repair_.reset();
+
+        QString note = QStringLiteral("AI 請求失敗：%1")
+                           .arg(QString::fromStdString(error.message));
+        const QString advice = adviceForHttpStatus(error.httpStatus);
+        if (!advice.isEmpty()) note += QStringLiteral("\n") + advice;
+        chat_->appendSystemNote(note);
     });
 
     // Emergency abort. Registered as an application-wide shortcut so it works
@@ -502,6 +623,7 @@ void MainWindow::applySettings() {
 
     locator_.setWorkingDirectory(settings_.projectDirectory.toStdString());
     execution_.setWorkingDirectory(settings_.projectDirectory);
+    execution_.setFailureScreenshotDirectory(projectSubdirectory(QStringLiteral("runs")));
 
     repository_.setDirectory(settings_.publishDirectory.toStdString());
     runStore_.setPersistencePath(settings_.runHistoryPath.toStdString());
@@ -529,11 +651,30 @@ void MainWindow::startApiServerIfConfigured() {
     std::string error;
     if (api_->start(settings_.toServerConfig(), error)) {
         apiStatusLabel_->setText(QStringLiteral("API：埠 %1").arg(api_->boundPort()));
+        startTunnelIfConfigured();
     } else {
         appendLog(3, QString(),
                   QStringLiteral("無法啟動 API 伺服器：%1").arg(QString::fromStdString(error)));
         apiStatusLabel_->setText(QStringLiteral("API：啟動失敗"));
     }
+}
+
+void MainWindow::startTunnelIfConfigured() {
+    if (!settings_.tunnelAutoStart || !tunnel_ || !api_->isRunning()) return;
+
+    // Same gate as the manual button: with no key, every authenticated endpoint
+    // refuses anyway, so opening the tunnel would only advertise the machine.
+    if (settings_.apiKeys.isEmpty()) {
+        appendLog(2, QString(),
+                  QStringLiteral("設定為自動開啟對外通道，但沒有任何 API 金鑰，因此不開。"));
+        return;
+    }
+
+    // Everything else -- missing token, missing hostname, missing binary -- is
+    // validated inside TunnelController, and comes back through failed() into
+    // the log with the same wording the manual path shows.
+    tunnel_->setAutoReconnect(true);
+    tunnel_->start(settings_.toTunnelConfig(api_->boundPort()));
 }
 
 void MainWindow::loadOcrModels() {
@@ -818,9 +959,26 @@ void MainWindow::updateActionStates() {
                                      : QStringLiteral("⏺  錄製"));
 
     if (api_) {
-        apiStatusLabel_->setText(api_->isRunning()
-                                     ? QStringLiteral("API：埠 %1").arg(api_->boundPort())
-                                     : QStringLiteral("API：已停止"));
+        // The tunnel state is shown here, not only inside the API dialog. That
+        // dialog can be closed with the tunnel still open, and "this machine is
+        // reachable from the internet" is not a fact to leave behind a window
+        // the user has to remember to reopen.
+        if (tunnel_ && tunnel_->isRunning()) {
+            apiStatusLabel_->setText(
+                QStringLiteral("<span style='color:%1'><b>API：對外開放中</b></span>")
+                    .arg(theme().danger.name()));
+            apiStatusLabel_->setToolTip(
+                tunnel_->publicUrl().isEmpty()
+                    ? QStringLiteral("正在建立對外通道…")
+                    : QStringLiteral("%1\n\n網際網路上持有 API 金鑰的人都能操作這台電腦。"
+                                     "到「工具 → API 伺服器」可以關閉。")
+                          .arg(tunnel_->publicUrl()));
+        } else {
+            apiStatusLabel_->setText(api_->isRunning()
+                                         ? QStringLiteral("API：埠 %1").arg(api_->boundPort())
+                                         : QStringLiteral("API：已停止"));
+            apiStatusLabel_->setToolTip(QString());
+        }
     }
 }
 
@@ -1103,8 +1261,7 @@ void MainWindow::handOffRecordingToAssistant(const recorder::RecordingSession& s
     }
 
     awaitingRecordingDraft_ = true;
-    chat_->setBusy(true);
-    agent_->send(history);
+    dispatchToAssistant(std::move(history));
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,6 +1288,53 @@ void MainWindow::sendToAssistant(const QString& text, bool attachScreenshot) {
         chat_->clearAttachScreenshot();
     }
 
+    dispatchToAssistant(std::move(history));
+}
+
+void MainWindow::askAssistantAboutFailure() {
+    if (!lastFailure_) return;
+    if (agent_->isBusy()) {
+        statusBar()->showMessage(QStringLiteral("AI 還在處理上一個請求，請稍候。"));
+        return;
+    }
+
+    // The screenshot only leaves the machine because the user pressed a button
+    // that says it will be attached. That consent is the whole reason the
+    // capture is written to disk and left there rather than sent automatically.
+    std::vector<unsigned char> screenshot;
+    if (!lastFailure_->screenshotPath.isEmpty()) {
+        QFile file(lastFailure_->screenshotPath);
+        if (file.open(QIODevice::ReadOnly)) {
+            const QByteArray bytes = file.readAll();
+            screenshot.assign(bytes.begin(), bytes.end());
+        }
+    }
+    const bool hasScreenshot = !screenshot.empty();
+
+    // The log is where the locator reports what it did read, which is usually
+    // the difference between "not on screen" and "OCR read it differently".
+    const QStringList logLines = log_->toPlainText().split(QLatin1Char('\n'));
+    const QString logTail = logLines.mid(std::max(0, int(logLines.size()) - 30)).join(QLatin1Char('\n'));
+
+    const QString question =
+        hasScreenshot
+            ? QStringLiteral("流程在步驟「%1」失敗了，請幫我看看哪裡出錯。（已附上失敗當下的畫面）")
+                  .arg(QString::fromStdString(lastFailure_->failedStepId))
+            : QStringLiteral("流程在步驟「%1」失敗了，請幫我看看哪裡出錯。")
+                  .arg(QString::fromStdString(lastFailure_->failedStepId));
+    chat_->appendUserMessage(question, hasScreenshot);
+
+    std::vector<ai::ChatMessage> history = chat_->history();
+    history.back().text = ai::PromptBuilder::runFailureRequest(
+        lastFailure_->script, lastFailure_->failedStepId, lastFailure_->error,
+        logTail.toStdString(), hasScreenshot);
+    history.back().imagePng = std::move(screenshot);
+
+    dispatchToAssistant(std::move(history));
+}
+
+void MainWindow::dispatchToAssistant(std::vector<ai::ChatMessage> history) {
+    repair_.emplace(history);
     chat_->setBusy(true);
     agent_->send(history);
 }
@@ -1215,7 +1419,8 @@ void MainWindow::publishCurrentFlow() {
 
 void MainWindow::showApiPanel() {
     if (!apiPanel_) {
-        apiPanel_ = new ApiPanelDialog(&settings_, api_.get(), &repository_, &runStore_, this);
+        apiPanel_ =
+            new ApiPanelDialog(&settings_, api_.get(), &repository_, &runStore_, tunnel_, this);
         connect(apiPanel_, &ApiPanelDialog::settingsChanged, this, [this] {
             settings_.save();
             updateActionStates();

@@ -216,6 +216,13 @@ void TargetPickerOverlay::buildPanel() {
     matchLayout->addStretch(1);
     modeLayout->addWidget(matchRow);
 
+    // Offered only when the automation tree recognises what was selected, so
+    // the option appears with a real sentence in it rather than as a mode the
+    // user has to understand and fill in.
+    relativeRadio_ = new QRadioButton(modeBox);
+    relativeRadio_->setVisible(false);
+    modeLayout->addWidget(relativeRadio_);
+
     templateRadio_ = new QRadioButton(QStringLiteral("圖片比對（OpenCV）"), modeBox);
     modeLayout->addWidget(templateRadio_);
 
@@ -285,6 +292,16 @@ void TargetPickerOverlay::buildPanel() {
 }
 
 bool TargetPickerOverlay::beginPick(QString& error) {
+    // Before anything of ours is on screen: once the covers are up, the
+    // foreground window is one of them, and the tree we would read is our own.
+    {
+        recorder::initializeUiaForThread();
+        std::string uiaError;
+        uiaSnapshot_ = recorder::dumpWindowTree({}, 40, 4000, uiaError);
+        recorder::uninitializeUiaForThread();
+    }
+    proposedRelative_.reset();
+
     std::string captureError;
     const cv::Mat capture = vision::ScreenCapture::grab(std::nullopt, captureError);
     if (capture.empty()) {
@@ -437,7 +454,10 @@ void TargetPickerOverlay::surfaceReleased(PickerSurface* surface, const QPoint& 
 
     templatePreview_->setPixmap(surface->slice().copy(toPixmapRect()));
 
+    // OCR first: the proposal may switch the selected mode away from it, and
+    // reading the text anyway keeps that a choice rather than a dead end.
     if (ocrRadio_->isChecked()) runOcrOnSelection();
+    proposeRelativeTarget();
 }
 
 void TargetPickerOverlay::surfaceKeyPressed(int key) {
@@ -538,8 +558,128 @@ void TargetPickerOverlay::cancel() {
     emit cancelled();
 }
 
+void TargetPickerOverlay::proposeRelativeTarget() {
+    proposedRelative_.reset();
+
+    // Hand the selection back to OCR before hiding the option. Leaving a hidden
+    // radio checked would send the next confirm down the template branch --
+    // saving a PNG for a user who asked for neither.
+    if (relativeRadio_->isChecked()) {
+        // Blocked so this does not re-run the OCR that just finished.
+        const QSignalBlocker block(ocrRadio_);
+        ocrRadio_->setChecked(true);
+        matchCombo_->setEnabled(true);
+    }
+    relativeRadio_->setVisible(false);
+
+    if (uiaSnapshot_.empty() || !hasSelection_) return;
+
+    const core::Rect selection = toScreenRect();
+    const core::Point centre = selection.center();
+
+    auto contains = [&](const core::Rect& r) {
+        return centre.x >= r.x && centre.x < r.x + r.width && centre.y >= r.y &&
+               centre.y < r.y + r.height;
+    };
+    auto area = [](const core::Rect& r) { return static_cast<long long>(r.width) * r.height; };
+
+    // Smallest containing control: the tree nests, and the innermost node under
+    // the cursor is the thing pointed at rather than the panel around it.
+    const recorder::UiaNode* picked = nullptr;
+    for (const auto& node : uiaSnapshot_) {
+        if (node.offscreen || node.bounds.empty() || !contains(node.bounds)) continue;
+        if (!node.keyboardFocusable) continue;
+        if (!picked || area(node.bounds) < area(picked->bounds)) picked = &node;
+    }
+    if (!picked) return;
+
+    core::Target target;
+    target.kind = core::TargetKind::Relative;
+    target.match = core::MatchMode::Exact;
+    target.role = picked->controlType == "Button"     ? core::ElementRole::Button
+                  : picked->controlType == "CheckBox" ? core::ElementRole::Checkbox
+                                                      : core::ElementRole::Input;
+
+    QString sentence;
+    if (!picked->name.empty()) {
+        // The control names itself after its label, which is the sturdiest form
+        // of this target: no coordinates are involved at all.
+        target.text = picked->name;
+        target.direction = core::Direction::Right;
+        sentence = QStringLiteral("名稱是「%1」的%2")
+                       .arg(QString::fromStdString(picked->name),
+                            target.role == core::ElementRole::Button
+                                ? QStringLiteral("按鈕")
+                                : QStringLiteral("輸入框"));
+    } else {
+        // Unnamed, so anchor on the nearest label instead. Left first, then
+        // above: that is the order forms actually use.
+        const recorder::UiaNode* label = nullptr;
+        int bestDistance = -1;
+        core::Direction bestDirection = core::Direction::Right;
+
+        for (const auto& node : uiaSnapshot_) {
+            if (node.offscreen || node.bounds.empty() || node.name.empty()) continue;
+            if (node.controlType != "Text") continue;
+
+            const bool sameRow = node.bounds.y < picked->bounds.y + picked->bounds.height &&
+                                 picked->bounds.y < node.bounds.y + node.bounds.height;
+            const bool sameColumn = node.bounds.x < picked->bounds.x + picked->bounds.width &&
+                                    picked->bounds.x < node.bounds.x + node.bounds.width;
+
+            int distance = -1;
+            core::Direction direction = core::Direction::Right;
+            if (sameRow && node.bounds.x + node.bounds.width <= picked->bounds.x) {
+                distance = picked->bounds.x - (node.bounds.x + node.bounds.width);
+                direction = core::Direction::Right;
+            } else if (sameColumn && node.bounds.y + node.bounds.height <= picked->bounds.y) {
+                // Weighted so a label on the same row wins over one above at an
+                // equal pixel distance.
+                distance = (picked->bounds.y - (node.bounds.y + node.bounds.height)) + 1000;
+                direction = core::Direction::Below;
+            }
+            if (distance < 0) continue;
+            if (bestDistance >= 0 && distance >= bestDistance) continue;
+
+            bestDistance = distance;
+            bestDirection = direction;
+            label = &node;
+        }
+        if (!label) return;
+
+        target.text = label->name;
+        target.direction = bestDirection;
+        sentence = QStringLiteral("「%1」%2的%3")
+                       .arg(QString::fromStdString(label->name),
+                            bestDirection == core::Direction::Right ? QStringLiteral("右邊")
+                                                                    : QStringLiteral("下面"),
+                            target.role == core::ElementRole::Button
+                                ? QStringLiteral("按鈕")
+                                : QStringLiteral("輸入框"));
+    }
+
+    proposedRelative_ = target;
+    relativeRadio_->setText(QStringLiteral("%1  —— 不看畫面，最穩").arg(sentence));
+    relativeRadio_->setToolTip(
+        QStringLiteral("由程式本身回報的控制項資訊定位，不受字級、顯示縮放或視窗位移影響。"
+                       "遠端桌面或自繪介面則不適用，那時請改用上面兩種。"));
+    relativeRadio_->setVisible(true);
+    // Pre-selected: when it is available it is the better answer, and a user who
+    // does not read the options should still land on the sturdier target.
+    relativeRadio_->setChecked(true);
+}
+
 void TargetPickerOverlay::confirm() {
     if (!hasSelection_ || !activeSurface_) return;
+
+    if (relativeRadio_->isChecked() && proposedRelative_) {
+        core::Target target = *proposedRelative_;
+        target.offsetX = offsetXSpin_->value();
+        target.offsetY = offsetYSpin_->value();
+        emit targetPicked(target);
+        dismiss();
+        return;
+    }
 
     core::Target target;
     target.offsetX = offsetXSpin_->value();

@@ -24,7 +24,13 @@ enum class StepType {
     If,
     Loop,
     HttpRequest,
+    LaunchApp,
 };
+
+/// One past the last `StepType`. Anything that has to cover every step kind --
+/// the AI schema, the palette, the round-trip tests -- iterates against this so
+/// adding a type surfaces as a failure rather than a silent gap.
+constexpr int kStepTypeCount = static_cast<int>(StepType::LaunchApp) + 1;
 
 std::string toString(StepType type);
 bool parseStepType(const std::string& text, StepType& out);
@@ -33,7 +39,34 @@ enum class TargetKind {
     Ocr,
     Image,
     Point,
+    /// "The field next to this label." Resolved against whatever the target
+    /// application exposes -- see `Direction` and `ElementRole`.
+    Relative,
 };
+
+/// Where the wanted control sits in relation to its label. Forms put labels
+/// above their fields as often as beside them, and the same form does both.
+enum class Direction {
+    Right,
+    Left,
+    Above,
+    Below,
+};
+
+/// What kind of control to accept. Deliberately coarse: a user pointing at a
+/// form thinks "the box I type into", not "UIA_EditControlTypeId", and the
+/// vision fallback cannot tell the finer kinds apart anyway.
+enum class ElementRole {
+    Any,
+    Input,
+    Button,
+    Checkbox,
+};
+
+std::string toString(Direction direction);
+bool parseDirection(const std::string& text, Direction& out);
+std::string toString(ElementRole role);
+bool parseElementRole(const std::string& text, ElementRole& out);
 
 struct RetryPolicy {
     int times = 3;
@@ -59,6 +92,13 @@ struct Target {
 
     // kind == Point
     Point point;
+
+    // kind == Relative -- `text` and `match` above name the anchor label.
+    Direction direction = Direction::Right;
+    ElementRole role = ElementRole::Input;
+    /// How far from the anchor to keep looking, in pixels. Bounds the search so
+    /// a missing field cannot match something on the far side of the window.
+    int maxDistance = 400;
 
     // Shared
     std::optional<Rect> region;
@@ -117,8 +157,12 @@ struct Step {
     std::string titleMatch;
     MatchMode titleMatchMode = MatchMode::Contains;
 
-    // Screenshot
+    // Screenshot / LaunchApp
     std::string path;
+
+    // LaunchApp
+    std::string launchArgs;
+    std::string workingDir;
 
     // If
     std::optional<Condition> condition;

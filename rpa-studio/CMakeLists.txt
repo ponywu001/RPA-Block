@@ -26,10 +26,14 @@
     src/TargetPickerOverlay.h
     src/ScreenGeometryDump.cpp
     src/ScreenGeometryDump.h
+    src/UiaTreeDump.cpp
+    src/UiaTreeDump.h
     src/CommandPreviewDialog.cpp
     src/CommandPreviewDialog.h
     src/ApiPanelDialog.cpp
     src/ApiPanelDialog.h
+    src/TunnelController.cpp
+    src/TunnelController.h
     src/SettingsDialog.cpp
     src/SettingsDialog.h
     src/RecordingDialogs.cpp
@@ -64,7 +68,7 @@ if(TARGET rpa-recorder)
 endif()
 
 if(WIN32)
-    # Credential Manager, for the AI gateway secret.
+    # Credential Manager, for the AI gateway secret and the tunnel authtoken.
     target_link_libraries(rpa-studio PRIVATE advapi32)
 endif()
 

@@ -675,3 +675,76 @@ RPA_TEST(generated_api_keys_are_prefixed_and_unique) {
     CHECK_EQ(first.size(), size_t{39});
     CHECK(first != second);
 }
+
+RPA_TEST(failure_screenshot_path_survives_a_reload) {
+    // The path is what an operator follows to see why an unattended run stopped,
+    // so it has to outlive the process that recorded it.
+    const fs::path file = fs::temp_directory_path() /
+                          ("rpa-runs-" + std::to_string(::rand()) + ".jsonl");
+    fs::remove(file);
+
+    std::string runId;
+    {
+        server::RunStore store;
+        store.setPersistencePath(file.string());
+        runId = store.createRun("erp-login", "api", {});
+
+        core::RunResult result;
+        result.status = core::RunStatus::Failed;
+        result.failedStepId = "find-login";
+        result.error = "no OCR match";
+        store.complete(runId, result, "C:/runs/run_1-failed.png");
+
+        const auto record = store.find(runId);
+        CHECK(record.has_value());
+        CHECK_EQ(record->failureScreenshotPath, std::string("C:/runs/run_1-failed.png"));
+    }
+
+    server::RunStore reloaded;
+    reloaded.setPersistencePath(file.string());
+    const auto record = reloaded.find(runId);
+    CHECK(record.has_value());
+    CHECK_EQ(record->failureScreenshotPath, std::string("C:/runs/run_1-failed.png"));
+
+    fs::remove(file);
+}
+
+RPA_TEST(a_successful_run_records_no_screenshot) {
+    server::RunStore store;
+    const std::string runId = store.createRun("erp-login", "ui", {});
+
+    core::RunResult result;
+    result.status = core::RunStatus::Succeeded;
+    store.complete(runId, result);
+
+    const auto record = store.find(runId);
+    CHECK(record.has_value());
+    CHECK(record->failureScreenshotPath.empty());
+}
+
+RPA_TEST(repeated_bad_keys_get_throttled_but_a_valid_one_still_works) {
+    // Matters once the server is reachable from the internet: nothing else
+    // limits how fast a key can be guessed at.
+    ServerFixture f;
+    f.boot();
+    auto client = f.client();
+
+    int unauthorised = 0;
+    int throttled = 0;
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        auto response = client.Get("/api/v1/scripts", {{"X-API-Key", "sk-pra-wrong"}});
+        CHECK(response != nullptr);
+        if (response->status == 401) ++unauthorised;
+        if (response->status == 429) ++throttled;
+    }
+
+    CHECK(unauthorised > 0);
+    CHECK(throttled > 0);
+
+    // The throttle counts failures only, so whoever holds a real key is never
+    // shut out by someone else's guessing -- otherwise this would be a way to
+    // take the owner's own automation offline.
+    auto allowed = client.Get("/api/v1/scripts", f.auth());
+    CHECK(allowed != nullptr);
+    CHECK_EQ(allowed->status, 200);
+}

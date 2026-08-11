@@ -54,6 +54,7 @@ private:
     QWidget* buildScreenshotPage();
     QWidget* buildBranchPage();
     QWidget* buildHttpPage();
+    QWidget* buildLaunchPage();
 
     void loadInto();
     void emitEdit();
@@ -78,6 +79,9 @@ private:
     QComboBox* targetKindCombo_;
     QLineEdit* targetTextEdit_;
     QComboBox* targetMatchCombo_;
+    QComboBox* targetDirectionCombo_;
+    QComboBox* targetRoleCombo_;
+    QSpinBox* targetDistanceSpin_;
     QLineEdit* targetTemplateEdit_;
     QDoubleSpinBox* targetThresholdSpin_;
     QSpinBox* targetPointXSpin_;
@@ -132,6 +136,13 @@ private:
     QPlainTextEdit* headersEdit_;
     QPlainTextEdit* bodyEdit_;
     QLineEdit* httpSaveVarEdit_;
+
+    // Launch app
+    QLineEdit* appPathEdit_;
+    QPushButton* appBrowseButton_;
+    QLineEdit* appArgsEdit_;
+    QLineEdit* appWorkingDirEdit_;
+    QPushButton* appWorkingDirBrowseButton_;
 };
 
 }  // namespace rpa::studio

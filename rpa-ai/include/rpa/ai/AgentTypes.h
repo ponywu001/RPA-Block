@@ -55,6 +55,10 @@ struct AgentReply {
     /// Per-step problems: the step's index, id, and what went wrong. Reported
     /// rather than swallowed so the user can fix a partial draft by hand.
     std::vector<std::string> stepIssues;
+    /// The `steps` array exactly as the agent wrote it. `steps` above holds only
+    /// the rows that parsed, so a repair round needs this to show the agent the
+    /// rows it got wrong.
+    std::string rawStepsJson;
 
     double costUsd = 0.0;
     int inputTokens = 0;

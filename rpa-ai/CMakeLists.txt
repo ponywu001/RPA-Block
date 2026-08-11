@@ -4,6 +4,9 @@
 add_library(rpa-ai-schema STATIC
     src/OutputSchema.cpp
     src/PromptBuilder.cpp
+    src/SseParser.cpp
+    src/ReplyDecoder.cpp
+    src/DraftRepair.cpp
 )
 
 add_library(rpa::ai_schema ALIAS rpa-ai-schema)
@@ -32,4 +35,11 @@ if(RPA_BUILD_STUDIO)
     target_link_libraries(rpa-ai PUBLIC rpa::ai_schema Qt6::Core Qt6::Network)
     set_target_properties(rpa-ai PROPERTIES AUTOMOC ON)
     rpa_set_target_defaults(rpa-ai)
+
+    # Console probe. The SSE framing can only be held to what the gateway really
+    # sends by talking to it, and that needs no GUI -- so it gets its own binary
+    # rather than a hidden mode of the desktop app.
+    add_executable(rpa-ai-probe tools/probe_main.cpp)
+    target_link_libraries(rpa-ai-probe PRIVATE rpa::ai rpa::core)
+    rpa_set_target_defaults(rpa-ai-probe)
 endif()

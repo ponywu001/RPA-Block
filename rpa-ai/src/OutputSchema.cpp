@@ -46,7 +46,8 @@ std::string rpaOutputSchemaJson() {
         {"value", json{{"type", "literal_str"},
                        {"values", json::array({"click", "double_click", "type_text", "key_press",
                                                "wait", "ocr_find", "image_find", "window_activate",
-                                               "screenshot", "if", "loop", "http_request"})}}},
+                                               "screenshot", "if", "loop", "http_request",
+                                               "launch_app"})}}},
     });
     stepEntries.push_back(json{
         {"key", "params_json"},
@@ -94,6 +95,9 @@ serialized as a string. Fields per type:
              "save_to_var": "last_match"}
 - image_find: {"template": "assets/foo.png", "threshold": 0.85,
                "offset_x": 0, "offset_y": 0, "retry": {...}, "save_to_var": "..."}
+- launch_app: {"path": "C:\\Windows\\notepad.exe", "args": "", "working_dir": ""}
+               // path may also be a document, a folder, or an http(s) URL, and may
+               // contain %ENV_VARS%. Fire-and-forget: it does not wait for the app.
 - window_activate: {"title_match": "ERP", "match": "contains"}
 - screenshot: {"path": "out/shot.png"}
 - if: {"condition": <condition>, "then_steps": [<step>...], "else_steps": [<step>...]}
@@ -104,6 +108,9 @@ serialized as a string. Fields per type:
 <target> is one of:
   {"kind": "ocr", "text": "登入", "match": "exact", "offset_x": 0, "offset_y": 0}
   {"kind": "image", "template": "assets/login.png", "threshold": 0.85}
+  {"kind": "relative", "text": "客戶全稱", "match": "contains",
+   "direction": "right"|"left"|"above"|"below",
+   "element": "input"|"button"|"checkbox"|"any", "max_distance": 400}
   {"kind": "point", "x": 512, "y": 300}
 
 <condition> is one of:
@@ -125,8 +132,23 @@ but written as plain nested JSON objects inside the parent's params_json string.
    so in that step's comment.
 2. Use the element names and window titles from the recording to pick anchor text.
    A click on a control named "登入" becomes an ocr target with text "登入".
+2a. To reach a form field, use a relative target anchored on its label, not an
+   offset from the label. Fields have no text of their own to anchor on once
+   they are filled in, and a placeholder disappears the moment someone types.
+   "Type into the box beside 客戶全稱" is
+   {"kind": "relative", "text": "客戶全稱", "direction": "right", "element": "input"},
+   never an ocr target on 客戶全稱 with "offset_x": 120. Pixel offsets are
+   measured on one machine and wrong on the next: they move with font size,
+   display scaling and window width, and when they are wrong they click
+   something else rather than failing. Read the direction off the layout — forms
+   put labels to the left of their fields as often as above them, and the same
+   form does both.
 3. Start the flow with window_activate when the recording shows a specific
    application window, so replay does not depend on what happens to be focused.
+   When the user says the application has to be started rather than merely
+   focused, open it with launch_app first, then give it a wait or a
+   window_activate to settle before the first click — launch_app returns as soon
+   as the shell accepts the request, not when the window is on screen.
 4. Give every step a stable, descriptive id (login_btn, not step_4).
 5. Insert waits only where the UI genuinely needs time to settle — after a window
    activation or a submit. Do not pad the flow with waits.

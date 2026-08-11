@@ -17,7 +17,7 @@ enum class BlockCategory {
     Keyboard, ///< 鍵盤
     Timing,   ///< 等待
     Vision,   ///< 找畫面
-    Window,   ///< 視窗與截圖
+    Window,   ///< 開啟程式、視窗與截圖
     Control,  ///< 流程控制
     Network,  ///< 網路
 };

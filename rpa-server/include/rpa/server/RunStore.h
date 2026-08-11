@@ -22,6 +22,10 @@ struct RunRecord {
     std::string error;
     std::string source;  // "api" | "ui"
     std::map<std::string, std::string> variables;
+    /// Local path to the screen as the failing run left it. Never uploaded and
+    /// never served over HTTP -- the API reports the path so an operator knows
+    /// where to look on the machine that ran the flow.
+    std::string failureScreenshotPath;
 
     std::chrono::system_clock::time_point queuedAt = std::chrono::system_clock::now();
     std::optional<std::chrono::system_clock::time_point> startedAt;
@@ -46,7 +50,9 @@ public:
 
     void updateStatus(const std::string& runId, core::RunStatus status);
     void setCurrentStep(const std::string& runId, const std::string& stepId);
-    void complete(const std::string& runId, const core::RunResult& result);
+    void complete(const std::string& runId,
+                  const core::RunResult& result,
+                  const std::string& failureScreenshotPath = {});
 
     /// Called after a run reaches a terminal state, outside this store's lock.
     ///

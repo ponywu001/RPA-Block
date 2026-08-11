@@ -28,6 +28,7 @@ const core::StepType kOrder[] = {
     core::StepType::Wait,
     core::StepType::OcrFind,
     core::StepType::ImageFind,
+    core::StepType::LaunchApp,
     core::StepType::WindowActivate,
     core::StepType::Screenshot,
     core::StepType::If,

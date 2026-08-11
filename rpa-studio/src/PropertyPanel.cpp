@@ -2,7 +2,9 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDir>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -82,6 +84,7 @@ PropertyPanel::PropertyPanel(QWidget* parent) : QWidget(parent) {
     pages_->addWidget(buildScreenshotPage());  // 6
     pages_->addWidget(buildBranchPage());      // 7
     pages_->addWidget(buildHttpPage());        // 8
+    pages_->addWidget(buildLaunchPage());      // 9
     layout->addWidget(pages_);
 
     // Offset, region, and retry apply to click *and* to the two locate steps, so
@@ -143,6 +146,7 @@ QWidget* PropertyPanel::buildClickPage() {
     targetKindCombo_ = new QComboBox(page);
     targetKindCombo_->addItem(QStringLiteral("文字錨點（OCR）"), QStringLiteral("ocr"));
     targetKindCombo_->addItem(QStringLiteral("圖片比對"), QStringLiteral("image"));
+    targetKindCombo_->addItem(QStringLiteral("某個文字旁邊的控制項"), QStringLiteral("relative"));
     targetKindCombo_->addItem(QStringLiteral("固定座標"), QStringLiteral("point"));
     form->addRow(QStringLiteral("定位方式"), targetKindCombo_);
     connect(targetKindCombo_, &QComboBox::currentIndexChanged, this, [this] { emitEdit(); });
@@ -167,6 +171,34 @@ QWidget* PropertyPanel::buildClickPage() {
     targetThresholdSpin_->setDecimals(2);
     form->addRow(QStringLiteral("相似度"), targetThresholdSpin_);
     connect(targetThresholdSpin_, &QDoubleSpinBox::valueChanged, this, [this] { emitEdit(); });
+
+    // Relative targeting. Worded as a sentence rather than as field names,
+    // because "direction" and "element role" mean nothing to someone who is
+    // just pointing at the box beside a label.
+    targetDirectionCombo_ = new QComboBox(page);
+    targetDirectionCombo_->addItem(QStringLiteral("右邊"), QStringLiteral("right"));
+    targetDirectionCombo_->addItem(QStringLiteral("左邊"), QStringLiteral("left"));
+    targetDirectionCombo_->addItem(QStringLiteral("上面"), QStringLiteral("above"));
+    targetDirectionCombo_->addItem(QStringLiteral("下面"), QStringLiteral("below"));
+    form->addRow(QStringLiteral("在錨點的"), targetDirectionCombo_);
+    connect(targetDirectionCombo_, &QComboBox::currentIndexChanged, this, [this] { emitEdit(); });
+
+    targetRoleCombo_ = new QComboBox(page);
+    targetRoleCombo_->addItem(QStringLiteral("輸入框"), QStringLiteral("input"));
+    targetRoleCombo_->addItem(QStringLiteral("按鈕"), QStringLiteral("button"));
+    targetRoleCombo_->addItem(QStringLiteral("勾選方塊"), QStringLiteral("checkbox"));
+    targetRoleCombo_->addItem(QStringLiteral("任何可操作的"), QStringLiteral("any"));
+    form->addRow(QStringLiteral("找的是"), targetRoleCombo_);
+    connect(targetRoleCombo_, &QComboBox::currentIndexChanged, this, [this] { emitEdit(); });
+
+    targetDistanceSpin_ = new QSpinBox(page);
+    targetDistanceSpin_->setRange(10, 4000);
+    targetDistanceSpin_->setSingleStep(20);
+    targetDistanceSpin_->setSuffix(QStringLiteral(" px"));
+    targetDistanceSpin_->setToolTip(
+        QStringLiteral("離錨點多遠以內才算。設太大可能會抓到隔壁欄位。"));
+    form->addRow(QStringLiteral("最遠距離"), targetDistanceSpin_);
+    connect(targetDistanceSpin_, &QSpinBox::valueChanged, this, [this] { emitEdit(); });
 
     auto* pointRow = new QWidget(page);
     auto* pointLayout = new QHBoxLayout(pointRow);
@@ -467,6 +499,67 @@ QWidget* PropertyPanel::buildHttpPage() {
     return page;
 }
 
+QWidget* PropertyPanel::buildLaunchPage() {
+    auto* page = new QWidget(this);
+    auto* form = new QFormLayout(page);
+
+    auto* pathRow = new QWidget(page);
+    auto* pathLayout = new QHBoxLayout(pathRow);
+    pathLayout->setContentsMargins(0, 0, 0, 0);
+    appPathEdit_ = new QLineEdit(pathRow);
+    appPathEdit_->setPlaceholderText(QStringLiteral(R"(C:\Windows\notepad.exe)"));
+    appBrowseButton_ = new QPushButton(QStringLiteral("瀏覽…"), pathRow);
+    pathLayout->addWidget(appPathEdit_, 1);
+    pathLayout->addWidget(appBrowseButton_);
+    form->addRow(QStringLiteral("程式路徑"), pathRow);
+    connect(appPathEdit_, &QLineEdit::textEdited, this, [this] { emitEdit(); });
+    connect(appBrowseButton_, &QPushButton::clicked, this, [this] {
+        const QString chosen = QFileDialog::getOpenFileName(
+            this, QStringLiteral("選擇要開啟的程式"), appPathEdit_->text(),
+            QStringLiteral("應用程式與捷徑 (*.exe *.bat *.cmd *.lnk);;所有檔案 (*)"));
+        if (chosen.isEmpty()) return;
+        // Native separators: the path is going straight to the Windows shell,
+        // and a forward-slash path in the field looks wrong next to one the user
+        // pasted from Explorer.
+        appPathEdit_->setText(QDir::toNativeSeparators(chosen));
+        emitEdit();
+    });
+
+    appArgsEdit_ = new QLineEdit(page);
+    appArgsEdit_->setPlaceholderText(QStringLiteral(R"(選填，例如 "C:\報表\本月.xlsx")"));
+    form->addRow(QStringLiteral("參數"), appArgsEdit_);
+    connect(appArgsEdit_, &QLineEdit::textEdited, this, [this] { emitEdit(); });
+
+    auto* dirRow = new QWidget(page);
+    auto* dirLayout = new QHBoxLayout(dirRow);
+    dirLayout->setContentsMargins(0, 0, 0, 0);
+    appWorkingDirEdit_ = new QLineEdit(dirRow);
+    appWorkingDirEdit_->setPlaceholderText(QStringLiteral("選填，預設用專案資料夾"));
+    appWorkingDirBrowseButton_ = new QPushButton(QStringLiteral("瀏覽…"), dirRow);
+    dirLayout->addWidget(appWorkingDirEdit_, 1);
+    dirLayout->addWidget(appWorkingDirBrowseButton_);
+    form->addRow(QStringLiteral("工作目錄"), dirRow);
+    connect(appWorkingDirEdit_, &QLineEdit::textEdited, this, [this] { emitEdit(); });
+    connect(appWorkingDirBrowseButton_, &QPushButton::clicked, this, [this] {
+        const QString chosen = QFileDialog::getExistingDirectory(
+            this, QStringLiteral("選擇工作目錄"), appWorkingDirEdit_->text());
+        if (chosen.isEmpty()) return;
+        appWorkingDirEdit_->setText(QDir::toNativeSeparators(chosen));
+        emitEdit();
+    });
+
+    auto* hint = new QLabel(
+        QStringLiteral("路徑也可以填文件、資料夾或網址，會用系統預設的程式開啟。\n"
+                       "可以用 %ProgramFiles% 這類環境變數，也可以用 {{變數名}}。\n"
+                       "這個積木只負責啟動，不會等程式跑完；程式需要時間開啟時，"
+                       "後面接一個「等待」或用「切換視窗」等它出現。"),
+        page);
+    hint->setWordWrap(true);
+    form->addRow(QString(), hint);
+
+    return page;
+}
+
 int PropertyPanel::pageIndexFor(core::StepType type) const {
     switch (type) {
         case core::StepType::Click:
@@ -481,6 +574,7 @@ int PropertyPanel::pageIndexFor(core::StepType type) const {
         case core::StepType::If:
         case core::StepType::Loop: return 7;
         case core::StepType::HttpRequest: return 8;
+        case core::StepType::LaunchApp: return 9;
     }
     return 3;
 }
@@ -548,8 +642,14 @@ void PropertyPanel::loadInto() {
     switch (target.kind) {
         case core::TargetKind::Ocr: selectByData(targetKindCombo_, QStringLiteral("ocr")); break;
         case core::TargetKind::Image: selectByData(targetKindCombo_, QStringLiteral("image")); break;
+        case core::TargetKind::Relative:
+            selectByData(targetKindCombo_, QStringLiteral("relative"));
+            break;
         case core::TargetKind::Point: selectByData(targetKindCombo_, QStringLiteral("point")); break;
     }
+    selectByData(targetDirectionCombo_, QString::fromStdString(core::toString(target.direction)));
+    selectByData(targetRoleCombo_, QString::fromStdString(core::toString(target.role)));
+    targetDistanceSpin_->setValue(target.maxDistance);
     targetTextEdit_->setText(QString::fromStdString(target.text));
     selectByData(targetMatchCombo_, QString::fromStdString(core::toString(target.match)));
     targetTemplateEdit_->setText(QString::fromStdString(target.templatePath));
@@ -606,16 +706,27 @@ void PropertyPanel::loadInto() {
     bodyEdit_->setPlainText(QString::fromStdString(step_.body));
     httpSaveVarEdit_->setText(QString::fromStdString(step_.saveToVar));
 
+    appPathEdit_->setText(QString::fromStdString(step_.path));
+    appArgsEdit_->setText(QString::fromStdString(step_.launchArgs));
+    appWorkingDirEdit_->setText(QString::fromStdString(step_.workingDir));
+
     // Reveal only the target fields the chosen locate mode uses.
     const QString kind = targetKindCombo_->currentData().toString();
     const bool isOcr = kind == QStringLiteral("ocr");
     const bool isImage = kind == QStringLiteral("image");
-    targetTextEdit_->setEnabled(isOcr);
-    targetMatchCombo_->setEnabled(isOcr);
+    const bool isRelative = kind == QStringLiteral("relative");
+    const bool isPoint = kind == QStringLiteral("point");
+    // The anchor text and its match mode are shared: for a relative target they
+    // name the label rather than the thing being clicked.
+    targetTextEdit_->setEnabled(isOcr || isRelative);
+    targetMatchCombo_->setEnabled(isOcr || isRelative);
     targetTemplateEdit_->setEnabled(isImage);
     targetThresholdSpin_->setEnabled(isImage);
-    targetPointXSpin_->setEnabled(!isOcr && !isImage);
-    targetPointYSpin_->setEnabled(!isOcr && !isImage);
+    targetDirectionCombo_->setEnabled(isRelative);
+    targetRoleCombo_->setEnabled(isRelative);
+    targetDistanceSpin_->setEnabled(isRelative);
+    targetPointXSpin_->setEnabled(isPoint);
+    targetPointYSpin_->setEnabled(isPoint);
 
     const bool locatingByText = step_.type == core::StepType::OcrFind;
     locateTextEdit_->setEnabled(locatingByText);
@@ -653,12 +764,19 @@ core::Step PropertyPanel::step() const {
                 step.target.kind = core::TargetKind::Ocr;
             } else if (kind == QStringLiteral("image")) {
                 step.target.kind = core::TargetKind::Image;
+            } else if (kind == QStringLiteral("relative")) {
+                step.target.kind = core::TargetKind::Relative;
             } else {
                 step.target.kind = core::TargetKind::Point;
             }
             step.target.text = targetTextEdit_->text().toStdString();
             core::parseMatchMode(targetMatchCombo_->currentData().toString().toStdString(),
                                  step.target.match);
+            core::parseDirection(targetDirectionCombo_->currentData().toString().toStdString(),
+                                 step.target.direction);
+            core::parseElementRole(targetRoleCombo_->currentData().toString().toStdString(),
+                                   step.target.role);
+            step.target.maxDistance = targetDistanceSpin_->value();
             step.target.templatePath = targetTemplateEdit_->text().toStdString();
             step.target.threshold = targetThresholdSpin_->value();
             step.target.point = core::Point{targetPointXSpin_->value(), targetPointYSpin_->value()};
@@ -723,6 +841,11 @@ core::Step PropertyPanel::step() const {
             }
             break;
         }
+        case core::StepType::LaunchApp:
+            step.path = appPathEdit_->text().trimmed().toStdString();
+            step.launchArgs = appArgsEdit_->text().trimmed().toStdString();
+            step.workingDir = appWorkingDirEdit_->text().trimmed().toStdString();
+            break;
     }
 
     // Only read the tuning widgets for the step types that show them. Reading

@@ -2,16 +2,20 @@
 
 #include "CommandPreviewDialog.h"
 #include "Theme.h"
+#include "TunnelController.h"
 
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
+#include <QDesktopServices>
+#include <QFileDialog>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
@@ -45,16 +49,44 @@ ApiPanelDialog::ApiPanelDialog(AppSettings* settings,
                                server::ApiServer* api,
                                server::ScriptRepository* repository,
                                server::RunStore* runStore,
+                               TunnelController* tunnel,
                                QWidget* parent)
     : QDialog(parent),
       settings_(settings),
       api_(api),
       repository_(repository),
-      runStore_(runStore) {
+      runStore_(runStore),
+      tunnel_(tunnel) {
     setWindowTitle(QStringLiteral("REST API 伺服器"));
-    resize(860, 700);
+    resize(860, 760);
     buildUi();
     refresh();
+
+    if (tunnel_) {
+        connect(tunnel_, &TunnelController::opened, this, [this](const QString& url) {
+            refreshTunnel();
+            QMessageBox::information(
+                this, QStringLiteral("對外通道已開啟"),
+                QStringLiteral("公開網址：\n\n%1\n\n"
+                               "任何拿到這個網址和 API 金鑰的人都能操作這台電腦。"
+                               "用完請記得關閉。")
+                    .arg(url));
+        });
+        connect(tunnel_, &TunnelController::closed, this, [this](const QString& reason) {
+            refreshTunnel();
+            if (!reason.isEmpty()) {
+                QMessageBox::information(this, QStringLiteral("對外通道已關閉"), reason);
+            }
+        });
+        connect(tunnel_, &TunnelController::failed, this, [this](const QString& reason) {
+            refreshTunnel();
+            QMessageBox::critical(this, QStringLiteral("對外通道開啟失敗"), reason);
+        });
+        connect(tunnel_, &TunnelController::unreachable, this, [this](const QString& detail) {
+            refreshTunnel();
+            QMessageBox::warning(this, QStringLiteral("通道開著，但外面連不進來"), detail);
+        });
+    }
 
     // The server runs on its own thread, and history grows from API calls the
     // dialog never sees, so poll rather than trying to wire signals across.
@@ -62,6 +94,7 @@ ApiPanelDialog::ApiPanelDialog(AppSettings* settings,
     refreshTimer_->setInterval(2000);
     connect(refreshTimer_, &QTimer::timeout, this, [this] {
         refreshStatus();
+        refreshTunnel();
         refreshRuns();
     });
     refreshTimer_->start();
@@ -105,6 +138,112 @@ void ApiPanelDialog::buildUi() {
     serverLayout->addWidget(warning, 4, 0, 1, 3);
 
     layout->addWidget(serverBox);
+
+    // --- Public tunnel ----------------------------------------------------
+    auto* tunnelBox = new QGroupBox(QStringLiteral("對外通道"), this);
+    auto* tunnelLayout = new QGridLayout(tunnelBox);
+
+    tunnelStatusLabel_ = new QLabel(tunnelBox);
+    tunnelStatusLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    tunnelStatusLabel_->setWordWrap(true);
+    tunnelLayout->addWidget(tunnelStatusLabel_, 0, 0, 1, 2);
+
+    tunnelButton_ = new QPushButton(tunnelBox);
+    tunnelLayout->addWidget(tunnelButton_, 0, 2);
+    connect(tunnelButton_, &QPushButton::clicked, this, &ApiPanelDialog::toggleTunnel);
+
+    tunnelLayout->addWidget(new QLabel(QStringLiteral("服務"), tunnelBox), 1, 0);
+    tunnelProviderCombo_ = new QComboBox(tunnelBox);
+    tunnelProviderCombo_->addItem(QStringLiteral("ngrok"),
+                                  static_cast<int>(TunnelProvider::Ngrok));
+    tunnelProviderCombo_->addItem(QStringLiteral("Cloudflare Tunnel"),
+                                  static_cast<int>(TunnelProvider::Cloudflare));
+    tunnelLayout->addWidget(tunnelProviderCombo_, 1, 1, 1, 2);
+    connect(tunnelProviderCombo_, &QComboBox::currentIndexChanged, this, [this] {
+        settings_->tunnelProvider =
+            static_cast<TunnelProvider>(tunnelProviderCombo_->currentData().toInt());
+        applyTunnelProvider();
+        emit settingsChanged();
+    });
+
+    tunnelLayout->addWidget(new QLabel(QStringLiteral("token"), tunnelBox), 2, 0);
+    tunnelTokenEdit_ = new QLineEdit(tunnelBox);
+    tunnelTokenEdit_->setEchoMode(QLineEdit::Password);
+    tunnelLayout->addWidget(tunnelTokenEdit_, 2, 1, 1, 2);
+    connect(tunnelTokenEdit_, &QLineEdit::editingFinished, this, [this] {
+        settings_->setTunnelAuthToken(tunnelTokenEdit_->text().trimmed());
+    });
+
+    tunnelHostnameLabel_ = new QLabel(tunnelBox);
+    tunnelLayout->addWidget(tunnelHostnameLabel_, 3, 0);
+    tunnelHostnameEdit_ = new QLineEdit(tunnelBox);
+    tunnelLayout->addWidget(tunnelHostnameEdit_, 3, 1, 1, 2);
+    connect(tunnelHostnameEdit_, &QLineEdit::editingFinished, this, [this] {
+        const QString value = tunnelHostnameEdit_->text().trimmed();
+        if (settings_->tunnelProvider == TunnelProvider::Cloudflare) {
+            settings_->cloudflareHostname = value;
+        } else {
+            settings_->ngrokDomain = value;
+        }
+        emit settingsChanged();
+        refreshTunnel();
+    });
+
+    tunnelLayout->addWidget(new QLabel(QStringLiteral("執行檔"), tunnelBox), 4, 0);
+    tunnelBinaryEdit_ = new QLineEdit(tunnelBox);
+    tunnelLayout->addWidget(tunnelBinaryEdit_, 4, 1);
+    connect(tunnelBinaryEdit_, &QLineEdit::editingFinished, this, [this] {
+        const QString value = tunnelBinaryEdit_->text().trimmed();
+        if (settings_->tunnelProvider == TunnelProvider::Cloudflare) {
+            settings_->cloudflaredBinaryPath = value;
+        } else {
+            settings_->ngrokBinaryPath = value;
+        }
+        emit settingsChanged();
+    });
+
+    auto* browseButton = new QPushButton(QStringLiteral("瀏覽…"), tunnelBox);
+    tunnelLayout->addWidget(browseButton, 4, 2);
+    connect(browseButton, &QPushButton::clicked, this, &ApiPanelDialog::browseForTunnelBinary);
+
+    tunnelAutoStartCheck_ = new QCheckBox(
+        QStringLiteral("程式啟動時自動開通道，斷線自動重連（給要長期掛在外網的機器）"),
+        tunnelBox);
+    tunnelLayout->addWidget(tunnelAutoStartCheck_, 5, 0, 1, 3);
+    connect(tunnelAutoStartCheck_, &QCheckBox::toggled, this, [this](bool on) {
+        settings_->tunnelAutoStart = on;
+        if (tunnel_) tunnel_->setAutoReconnect(on);
+        emit settingsChanged();
+    });
+
+    auto* tunnelButtons = new QHBoxLayout();
+    tunnelCopyUrlButton_ = new QPushButton(QStringLiteral("複製公開網址"), tunnelBox);
+    connect(tunnelCopyUrlButton_, &QPushButton::clicked, this, [this] {
+        if (tunnel_) QGuiApplication::clipboard()->setText(tunnel_->publicUrl());
+    });
+    tunnelButtons->addWidget(tunnelCopyUrlButton_);
+
+    tunnelDownloadButton_ = new QPushButton(tunnelBox);
+    connect(tunnelDownloadButton_, &QPushButton::clicked, this, [this] {
+        QDesktopServices::openUrl(
+            QUrl(settings_->tunnelProvider == TunnelProvider::Cloudflare
+                     ? QStringLiteral("https://developers.cloudflare.com/cloudflare-one/"
+                                      "connections/connect-networks/downloads/")
+                     : QStringLiteral("https://ngrok.com/download")));
+    });
+    tunnelButtons->addWidget(tunnelDownloadButton_);
+    tunnelButtons->addStretch();
+    tunnelLayout->addLayout(tunnelButtons, 6, 0, 1, 3);
+
+    // Neither agent is shipped inside this application: ngrok's terms only allow
+    // redistributing it when we hold the account, and here the user brings their
+    // own token.
+    tunnelNote_ = new QLabel(tunnelBox);
+    tunnelNote_->setWordWrap(true);
+    tunnelNote_->setOpenExternalLinks(true);
+    tunnelLayout->addWidget(tunnelNote_, 7, 0, 1, 3);
+
+    layout->addWidget(tunnelBox);
 
     connect(bindCombo_, &QComboBox::currentIndexChanged, this, [this] {
         settings_->apiBindAddress = bindCombo_->currentData().toString();
@@ -241,7 +380,18 @@ void ApiPanelDialog::refresh() {
         autoStartCheck_->setChecked(settings_->apiAutoStart);
     }
 
+    {
+        const QSignalBlocker blockProvider(tunnelProviderCombo_);
+        const QSignalBlocker blockAuto(tunnelAutoStartCheck_);
+        tunnelAutoStartCheck_->setChecked(settings_->tunnelAutoStart);
+        const int providerIndex =
+            tunnelProviderCombo_->findData(static_cast<int>(settings_->tunnelProvider));
+        if (providerIndex >= 0) tunnelProviderCombo_->setCurrentIndex(providerIndex);
+    }
+    applyTunnelProvider();
+
     refreshStatus();
+    refreshTunnel();
     refreshKeys();
     refreshScripts();
     refreshRuns();
@@ -267,8 +417,13 @@ void ApiPanelDialog::refreshStatus() {
 
 void ApiPanelDialog::toggleServer() {
     if (api_->isRunning()) {
+        // The tunnel forwards to this port. Leaving it open once the server is
+        // gone would publish an address that answers nothing, and would come
+        // back to life pointed at whatever binds that port next.
+        if (tunnel_ && tunnel_->isRunning()) tunnel_->stop();
         api_->stop();
         refreshStatus();
+        refreshTunnel();
         return;
     }
 
@@ -295,6 +450,155 @@ void ApiPanelDialog::toggleServer() {
         return;
     }
     refreshStatus();
+}
+
+void ApiPanelDialog::refreshTunnel() {
+    if (!tunnel_) return;
+
+    const bool open = tunnel_->isRunning();
+    const bool serverRunning = api_->isRunning();
+
+    if (open && !tunnel_->publicUrl().isEmpty()) {
+        tunnelStatusLabel_->setText(
+            QStringLiteral("<b><span style='color:%1'>● 已開放</span></b> — %2/api/v1")
+                .arg(theme().danger.name(), tunnel_->publicUrl()));
+    } else if (open) {
+        tunnelStatusLabel_->setText(QStringLiteral("<span style='color:%1'>● 連線中…</span>")
+                                        .arg(theme().textMuted.name()));
+    } else if (tunnel_->isReconnecting()) {
+        tunnelStatusLabel_->setText(QStringLiteral("<span style='color:%1'>● 斷線了，正在重連…</span>")
+                                        .arg(theme().danger.name()));
+    } else {
+        tunnelStatusLabel_->setText(QStringLiteral("<span style='color:%1'>● 未開放</span>")
+                                        .arg(theme().textMuted.name()));
+    }
+
+    const bool active = open || tunnel_->isReconnecting();
+    tunnelButton_->setText(active ? QStringLiteral("關閉通道") : QStringLiteral("開啟通道"));
+    // Nothing to tunnel to until the server is up, and the port could still
+    // change while it is stopped.
+    tunnelButton_->setEnabled(serverRunning || active);
+    tunnelProviderCombo_->setEnabled(!active);
+    tunnelTokenEdit_->setEnabled(!active);
+    tunnelHostnameEdit_->setEnabled(!active);
+    tunnelBinaryEdit_->setEnabled(!active);
+    tunnelCopyUrlButton_->setEnabled(open && !tunnel_->publicUrl().isEmpty());
+}
+
+void ApiPanelDialog::applyTunnelProvider() {
+    const bool cloudflare = settings_->tunnelProvider == TunnelProvider::Cloudflare;
+    const QString agent = agentName(settings_->tunnelProvider);
+
+    const QSignalBlocker blockToken(tunnelTokenEdit_);
+    const QSignalBlocker blockHostname(tunnelHostnameEdit_);
+    const QSignalBlocker blockBinary(tunnelBinaryEdit_);
+
+    tunnelTokenEdit_->setText(settings_->tunnelAuthToken());
+    tunnelTokenEdit_->setPlaceholderText(
+        cloudflare ? QStringLiteral("Zero Trust 後台那條通道的 token，整串 eyJ…")
+                   : QStringLiteral("ngrok 帳號的 authtoken"));
+
+    // The hostname is optional for ngrok and load-bearing for Cloudflare, whose
+    // agent never reports the address it is serving.
+    tunnelHostnameLabel_->setText(cloudflare ? QStringLiteral("公開主機名稱")
+                                             : QStringLiteral("固定網域（選填）"));
+    tunnelHostnameEdit_->setText(cloudflare ? settings_->cloudflareHostname
+                                            : settings_->ngrokDomain);
+    tunnelHostnameEdit_->setPlaceholderText(
+        cloudflare ? QStringLiteral("後台設定的對外主機名稱，例如 rpa.example.com（必填）")
+                   : QStringLiteral("已保留的網域，例如 my-rpa.ngrok.app；留空則每次隨機"));
+
+    QString binary = cloudflare ? settings_->cloudflaredBinaryPath : settings_->ngrokBinaryPath;
+    if (binary.isEmpty()) binary = TunnelController::findBinary(settings_->tunnelProvider);
+    tunnelBinaryEdit_->setText(binary);
+    tunnelBinaryEdit_->setPlaceholderText(QStringLiteral("%1.exe 的完整路徑").arg(agent));
+
+    tunnelDownloadButton_->setText(QStringLiteral("取得 %1…").arg(agent));
+
+    QString providerNote;
+    if (cloudflare) {
+        // The one mistake that costs the most, stated before it can be made:
+        // a token-based tunnel takes its service address from the dashboard,
+        // so nothing here can point it at the right port.
+        providerNote =
+            QStringLiteral("cloudflared 需要自行安裝。<b>請在 Cloudflare 後台把這個主機名稱"
+                           "指向 <code>http://127.0.0.1:%1</code></b> —— token 模式的通道"
+                           "是從後台取得本機位址的，這裡設不了。指錯的話通道會連上但完全不通。")
+                .arg(api_->isRunning() ? api_->boundPort() : settings_->apiPort);
+    } else {
+        providerNote = QStringLiteral(
+            "ngrok 需要自行安裝。要長期掛在外網，請用付費方案的固定網域填在上面 —— "
+            "否則每次重連網址都會換一組，呼叫端的設定就失效了。");
+    }
+
+    tunnelNote_->setText(
+        QStringLiteral(
+            "<span style='color:%1'><b>開啟後，網際網路上任何拿到那組網址和 API 金鑰的人，"
+            "都能操作這台電腦的滑鼠和鍵盤</b> —— 通道會直接穿過你的防火牆和路由器。</span><br>"
+            "<span style='color:%2'>%3 通道只連到 127.0.0.1，所以不需要同時把伺服器綁到 "
+            "0.0.0.0。</span>")
+            .arg(theme().danger.name(), theme().textMuted.name(), providerNote));
+
+    refreshTunnel();
+}
+
+void ApiPanelDialog::browseForTunnelBinary() {
+    const QString agent = agentName(settings_->tunnelProvider);
+    const QString chosen = QFileDialog::getOpenFileName(
+        this, QStringLiteral("選擇 %1 執行檔").arg(agent), tunnelBinaryEdit_->text(),
+        QStringLiteral("執行檔 (*.exe);;所有檔案 (*)"));
+    if (chosen.isEmpty()) return;
+
+    tunnelBinaryEdit_->setText(chosen);
+    if (settings_->tunnelProvider == TunnelProvider::Cloudflare) {
+        settings_->cloudflaredBinaryPath = chosen;
+    } else {
+        settings_->ngrokBinaryPath = chosen;
+    }
+    emit settingsChanged();
+}
+
+void ApiPanelDialog::toggleTunnel() {
+    if (!tunnel_) return;
+
+    if (tunnel_->isRunning() || tunnel_->isReconnecting()) {
+        tunnel_->stop();
+        refreshTunnel();
+        return;
+    }
+
+    if (!api_->isRunning()) {
+        QMessageBox::warning(this, QStringLiteral("伺服器還沒啟動"),
+                             QStringLiteral("請先啟動 REST API 伺服器，再開對外通道。"));
+        return;
+    }
+    if (settings_->apiKeys.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("還沒有 API 金鑰"),
+                             QStringLiteral("沒有金鑰就開通道，等於把這台電腦放到網路上"
+                                            "而且沒有任何東西擋著。請先產生一組金鑰。"));
+        return;
+    }
+
+    // Deliberately worded as what it does, not as what it is called. "開一條
+    // ngrok 通道" means nothing to the person this product is aimed at; "網路上
+    // 的人可以操作這台電腦" does.
+    const auto answer = QMessageBox::warning(
+        this, QStringLiteral("要把這台電腦開放到網際網路嗎？"),
+        QStringLiteral(
+            "開啟之後會產生一組公開網址，繞過防火牆直接連到這台電腦的 API。\n\n"
+            "任何同時拿到那組網址和 API 金鑰的人，都可以叫這台電腦執行流程 —— "
+            "也就是操作它的滑鼠和鍵盤。\n\n"
+            "確定要開嗎？"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes) return;
+
+    // TunnelController does the validating -- a missing token, a missing
+    // hostname and a missing binary each come back through failed() with the
+    // same wording whether the tunnel was opened from here or automatically at
+    // startup.
+    tunnel_->setAutoReconnect(settings_->tunnelAutoStart);
+    tunnel_->start(settings_->toTunnelConfig(api_->boundPort()));
+    refreshTunnel();
 }
 
 void ApiPanelDialog::generateKey() {
@@ -396,6 +700,13 @@ void ApiPanelDialog::setCurrentFlow(const core::Script& script) {
 }
 
 QString ApiPanelDialog::endpointFor(const QString& scriptId) const {
+    // While a tunnel is open the public URL is the address that is any use to
+    // the caller -- a copied command pointing at 127.0.0.1 would only work on
+    // this machine, which is the one place nobody needs the command for.
+    if (tunnel_ && tunnel_->isRunning() && !tunnel_->publicUrl().isEmpty()) {
+        return QStringLiteral("%1/api/v1/scripts/%2/run").arg(tunnel_->publicUrl(), scriptId);
+    }
+
     const int port = api_->isRunning() ? api_->boundPort() : settings_->apiPort;
     const QString host = settings_->apiBindAddress == QStringLiteral("0.0.0.0")
                              ? QStringLiteral("<this-machine>")

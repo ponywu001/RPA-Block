@@ -28,6 +28,46 @@ constexpr const char* kLegacyApplication = "PRA-compiler";
 #ifdef _WIN32
 const wchar_t* kCredentialTarget = L"RPA-Block/ai-gateway";
 const wchar_t* kLegacyCredentialTarget = L"PRA-compiler/ai-gateway";
+const wchar_t* kNgrokCredentialTarget = L"RPA-Block/tunnel-authtoken";
+const wchar_t* kCloudflareCredentialTarget = L"RPA-Block/tunnel-authtoken-cloudflare";
+
+/// Shared body of the credential accessors. Kept in one place so the tunnel
+/// token cannot drift into being stored differently from the gateway secret.
+QString readCredential(const wchar_t* target, const wchar_t* fallbackTarget) {
+    PCREDENTIALW credential = nullptr;
+    if (!CredReadW(target, CRED_TYPE_GENERIC, 0, &credential) &&
+        (fallbackTarget == nullptr ||
+         !CredReadW(fallbackTarget, CRED_TYPE_GENERIC, 0, &credential))) {
+        return {};
+    }
+
+    QString secret;
+    if (credential->CredentialBlob && credential->CredentialBlobSize > 0) {
+        secret = QString::fromUtf8(reinterpret_cast<const char*>(credential->CredentialBlob),
+                                   static_cast<int>(credential->CredentialBlobSize));
+    }
+    CredFree(credential);
+    return secret;
+}
+
+void writeCredential(const wchar_t* target, const QString& secret) {
+    if (secret.isEmpty()) {
+        CredDeleteW(target, CRED_TYPE_GENERIC, 0);
+        return;
+    }
+
+    const QByteArray utf8 = secret.toUtf8();
+
+    CREDENTIALW credential{};
+    credential.Type = CRED_TYPE_GENERIC;
+    credential.TargetName = const_cast<wchar_t*>(target);
+    credential.CredentialBlobSize = static_cast<DWORD>(utf8.size());
+    credential.CredentialBlob =
+        reinterpret_cast<LPBYTE>(const_cast<char*>(utf8.constData()));
+    credential.Persist = CRED_PERSIST_LOCAL_MACHINE;
+
+    CredWriteW(&credential, 0);
+}
 #endif
 
 /// Copy every key from the pre-rename settings, once.
@@ -91,6 +131,19 @@ void AppSettings::load() {
     apiKeys = store.value(QStringLiteral("keys"), apiKeys).toStringList();
     publishDirectory = store.value(QStringLiteral("publishDirectory"), publishDirectory).toString();
     runHistoryPath = store.value(QStringLiteral("runHistoryPath"), runHistoryPath).toString();
+    tunnelAutoStart = store.value(QStringLiteral("tunnelAutoStart"), tunnelAutoStart).toBool();
+    tunnelProvider = store.value(QStringLiteral("tunnelProvider")).toString() ==
+                             QStringLiteral("cloudflare")
+                         ? TunnelProvider::Cloudflare
+                         : TunnelProvider::Ngrok;
+    // "tunnelBinary" was the single-provider key; carry it over so an existing
+    // install does not have to find ngrok.exe again.
+    ngrokBinaryPath = store.value(QStringLiteral("ngrokBinary"),
+                                  store.value(QStringLiteral("tunnelBinary")))
+                          .toString();
+    cloudflaredBinaryPath = store.value(QStringLiteral("cloudflaredBinary")).toString();
+    ngrokDomain = store.value(QStringLiteral("ngrokDomain")).toString();
+    cloudflareHostname = store.value(QStringLiteral("cloudflareHostname")).toString();
     store.endGroup();
 
     store.beginGroup(QStringLiteral("recorder"));
@@ -151,6 +204,12 @@ void AppSettings::save() const {
     store.setValue(QStringLiteral("keys"), apiKeys);
     store.setValue(QStringLiteral("publishDirectory"), publishDirectory);
     store.setValue(QStringLiteral("runHistoryPath"), runHistoryPath);
+    store.setValue(QStringLiteral("tunnelAutoStart"), tunnelAutoStart);
+    store.setValue(QStringLiteral("tunnelProvider"), toString(tunnelProvider));
+    store.setValue(QStringLiteral("ngrokBinary"), ngrokBinaryPath);
+    store.setValue(QStringLiteral("cloudflaredBinary"), cloudflaredBinaryPath);
+    store.setValue(QStringLiteral("ngrokDomain"), ngrokDomain);
+    store.setValue(QStringLiteral("cloudflareHostname"), cloudflareHostname);
     store.endGroup();
 
     store.beginGroup(QStringLiteral("recorder"));
@@ -176,38 +235,25 @@ QString AppSettings::aiSecret() const {
     // gateway key instead of silently coming up unauthenticated. Nothing is
     // rewritten here -- the next real Settings commit moves it across, and until
     // then the old entry is left where its owner can still see it.
-    PCREDENTIALW credential = nullptr;
-    if (!CredReadW(kCredentialTarget, CRED_TYPE_GENERIC, 0, &credential) &&
-        !CredReadW(kLegacyCredentialTarget, CRED_TYPE_GENERIC, 0, &credential)) {
-        return {};
-    }
-
-    QString secret;
-    if (credential->CredentialBlob && credential->CredentialBlobSize > 0) {
-        secret = QString::fromUtf8(reinterpret_cast<const char*>(credential->CredentialBlob),
-                                   static_cast<int>(credential->CredentialBlobSize));
-    }
-    CredFree(credential);
-    return secret;
+    return readCredential(kCredentialTarget, kLegacyCredentialTarget);
 }
 
 void AppSettings::setAiSecret(const QString& secret) const {
-    if (secret.isEmpty()) {
-        CredDeleteW(kCredentialTarget, CRED_TYPE_GENERIC, 0);
-        return;
-    }
+    writeCredential(kCredentialTarget, secret);
+}
 
-    const QByteArray utf8 = secret.toUtf8();
+// Named `which` rather than `provider`: AppSettings already has a `provider`
+// member for the AI gateway, and shadowing it here is a warning.
+QString AppSettings::tunnelAuthToken(TunnelProvider which) const {
+    return readCredential(which == TunnelProvider::Cloudflare ? kCloudflareCredentialTarget
+                                                              : kNgrokCredentialTarget,
+                          nullptr);
+}
 
-    CREDENTIALW credential{};
-    credential.Type = CRED_TYPE_GENERIC;
-    credential.TargetName = const_cast<wchar_t*>(kCredentialTarget);
-    credential.CredentialBlobSize = static_cast<DWORD>(utf8.size());
-    credential.CredentialBlob =
-        reinterpret_cast<LPBYTE>(const_cast<char*>(utf8.constData()));
-    credential.Persist = CRED_PERSIST_LOCAL_MACHINE;
-
-    CredWriteW(&credential, 0);
+void AppSettings::setTunnelAuthToken(TunnelProvider which, const QString& token) const {
+    writeCredential(which == TunnelProvider::Cloudflare ? kCloudflareCredentialTarget
+                                                        : kNgrokCredentialTarget,
+                    token);
 }
 
 #else
@@ -222,7 +268,47 @@ void AppSettings::setAiSecret(const QString& secret) const {
     store.setValue(QStringLiteral("ai/secret"), secret);
 }
 
+QString AppSettings::tunnelAuthToken(TunnelProvider which) const {
+    QSettings store(QString::fromLatin1(kOrganisation), QString::fromLatin1(kApplication));
+    return store.value(QStringLiteral("api/tunnelToken-") + toString(which)).toString();
+}
+
+void AppSettings::setTunnelAuthToken(TunnelProvider which, const QString& token) const {
+    QSettings store(QString::fromLatin1(kOrganisation), QString::fromLatin1(kApplication));
+    store.setValue(QStringLiteral("api/tunnelToken-") + toString(which), token);
+}
+
 #endif  // _WIN32
+
+QString AppSettings::tunnelBinaryPath() const {
+    return tunnelProvider == TunnelProvider::Cloudflare ? cloudflaredBinaryPath : ngrokBinaryPath;
+}
+
+QString AppSettings::tunnelHostname() const {
+    return tunnelProvider == TunnelProvider::Cloudflare ? cloudflareHostname : ngrokDomain;
+}
+
+QString AppSettings::tunnelAuthToken() const {
+    return tunnelAuthToken(tunnelProvider);
+}
+
+void AppSettings::setTunnelAuthToken(const QString& token) const {
+    setTunnelAuthToken(tunnelProvider, token);
+}
+
+TunnelConfig AppSettings::toTunnelConfig(int port) const {
+    TunnelConfig config;
+    config.provider = tunnelProvider;
+    config.port = port;
+    config.hostname = tunnelHostname().trimmed();
+    config.authToken = tunnelAuthToken();
+
+    config.binaryPath = tunnelBinaryPath().trimmed();
+    if (config.binaryPath.isEmpty()) {
+        config.binaryPath = TunnelController::findBinary(tunnelProvider);
+    }
+    return config;
+}
 
 ai::AgentSettings AppSettings::toAgentSettings() const {
     ai::AgentSettings settings;

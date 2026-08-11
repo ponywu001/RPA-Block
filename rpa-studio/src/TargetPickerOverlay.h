@@ -10,6 +10,7 @@
 
 #include "rpa/core/Geometry.h"
 #include "rpa/core/Script.h"
+#include "rpa/recorder/UiaInspector.h"
 #include "rpa/vision/VisionLocator.h"
 
 class QComboBox;
@@ -72,6 +73,9 @@ private:
     void placePanel();
     void dismiss();
     void runOcrOnSelection();
+    /// Work out whether the selection sits on a control the automation tree
+    /// knows about, and if so offer it as an anchor-relative target.
+    void proposeRelativeTarget();
     void confirm();
     void cancel();
 
@@ -98,6 +102,7 @@ private:
     bool hasSelection_ = false;
 
     QRadioButton* ocrRadio_;
+    QRadioButton* relativeRadio_;
     QRadioButton* templateRadio_;
     QLabel* ocrResultLabel_;
     QComboBox* matchCombo_;
@@ -107,6 +112,13 @@ private:
     QSpinBox* offsetYSpin_;
     QPushButton* confirmButton_;
     QPushButton* cancelButton_;
+
+    /// The target application's control tree, captured *before* the overlay
+    /// goes up. Inspecting live would describe the overlay itself -- the same
+    /// reason OCR runs against the frozen capture rather than the screen.
+    std::vector<recorder::UiaNode> uiaSnapshot_;
+    /// The relative target proposed for the current selection, if any.
+    std::optional<core::Target> proposedRelative_;
 
     QString recognisedText_;
     double recognisedConfidence_ = 0.0;

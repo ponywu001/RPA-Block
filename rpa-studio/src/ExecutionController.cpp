@@ -1,12 +1,16 @@
 #include "ExecutionController.h"
 
+#include <QDir>
 #include <QMetaObject>
+
+#include "rpa/vision/ScreenCapture.h"
 
 namespace rpa::studio {
 
 ExecutionController::ExecutionController(QObject* parent) : QObject(parent) {
     qRegisterMetaType<rpa::core::RunStatus>("rpa::core::RunStatus");
     qRegisterMetaType<rpa::core::RunResult>("rpa::core::RunResult");
+    qRegisterMetaType<rpa::studio::RunOutcome>("rpa::studio::RunOutcome");
 }
 
 ExecutionController::~ExecutionController() {
@@ -53,6 +57,11 @@ void ExecutionController::setStepDelayMs(int delayMs) {
     stepDelayMs_ = delayMs;
 }
 
+void ExecutionController::setFailureScreenshotDirectory(const QString& directory) {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    failureScreenshotDirectory_ = directory;
+}
+
 core::RunStatus ExecutionController::status() const {
     return executor_ ? executor_->status() : core::RunStatus::Queued;
 }
@@ -89,20 +98,48 @@ bool ExecutionController::start(const core::Script& script,
     joinWorker();
 
     core::ExecutorConfig config = executor_->config();
+    QString failureDirectory;
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         activeRunId_ = runId;
         config.workingDirectory = workingDirectory_.toStdString();
         config.stepDelayMs = stepDelayMs_;
+        failureDirectory = failureScreenshotDirectory_;
     }
     executor_->setConfig(config);
 
     Q_UNUSED(source);
 
-    worker_ = std::thread([this, script, overrides, runId]() {
-        const core::RunResult result = executor_->run(script, overrides);
+    worker_ = std::thread([this, script, overrides, runId, failureDirectory]() {
+        RunOutcome outcome;
+        outcome.runId = runId;
+        outcome.script = script;
+        outcome.result = executor_->run(script, overrides);
+
+        // Captured here rather than from the step-finished callback: an abort
+        // returns from run() within microseconds of the failure, so the screen
+        // is still the one that failed, while the callback also fires for steps
+        // whose on_fail policy lets the flow carry on — those would produce a
+        // pile of screenshots of runs that ultimately succeeded.
+        if (outcome.result.status == core::RunStatus::Failed && !failureDirectory.isEmpty()) {
+            QDir().mkpath(failureDirectory);
+            const QString candidate =
+                QDir(failureDirectory).filePath(runId + QStringLiteral("-failed.png"));
+            std::string error;
+            if (vision::ScreenCapture::grabToFile(candidate.toStdString(), std::nullopt, error)) {
+                outcome.failureScreenshotPath = candidate;
+            } else {
+                // Capture fails on the secure desktop, among other places. It is
+                // a diagnostic nicety, never a reason to change the run's fate.
+                emit logged(static_cast<int>(core::LogLevel::Warn),
+                            QString::fromStdString(outcome.result.failedStepId),
+                            QStringLiteral("擷取失敗畫面失敗：%1")
+                                .arg(QString::fromStdString(error)));
+            }
+        }
+
         busy_.store(false);
-        emit runFinished(runId, result);
+        emit runFinished(outcome);
     });
 
     return true;

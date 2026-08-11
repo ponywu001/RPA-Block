@@ -45,7 +45,7 @@ foreach ($required in @($bin, $stub, $app)) {
 $stage = Join-Path $env:TEMP ("rpablock-stage-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-$excludeNames = @('rpa-pack-stub.exe', 'rpa-tests.exe', 'vc_redist.x64.exe')
+$excludeNames = @('rpa-pack-stub.exe', 'rpa-tests.exe', 'rpa-ai-probe.exe', 'vc_redist.x64.exe')
 $excludeExt = @('.pdb', '.ilk', '.exp', '.lib')
 
 Write-Host "Staging runtime files..."

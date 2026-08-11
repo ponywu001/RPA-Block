@@ -21,6 +21,42 @@ bool parseMatchMode(const std::string& text, MatchMode& out) {
     return false;
 }
 
+std::string toString(Direction direction) {
+    switch (direction) {
+        case Direction::Right: return "right";
+        case Direction::Left: return "left";
+        case Direction::Above: return "above";
+        case Direction::Below: return "below";
+    }
+    return "right";
+}
+
+bool parseDirection(const std::string& text, Direction& out) {
+    if (text == "right") { out = Direction::Right; return true; }
+    if (text == "left") { out = Direction::Left; return true; }
+    if (text == "above") { out = Direction::Above; return true; }
+    if (text == "below") { out = Direction::Below; return true; }
+    return false;
+}
+
+std::string toString(ElementRole role) {
+    switch (role) {
+        case ElementRole::Any: return "any";
+        case ElementRole::Input: return "input";
+        case ElementRole::Button: return "button";
+        case ElementRole::Checkbox: return "checkbox";
+    }
+    return "any";
+}
+
+bool parseElementRole(const std::string& text, ElementRole& out) {
+    if (text == "any") { out = ElementRole::Any; return true; }
+    if (text == "input") { out = ElementRole::Input; return true; }
+    if (text == "button") { out = ElementRole::Button; return true; }
+    if (text == "checkbox") { out = ElementRole::Checkbox; return true; }
+    return false;
+}
+
 std::string toString(MouseButton button) {
     switch (button) {
         case MouseButton::Left: return "left";
@@ -51,6 +87,7 @@ std::string toString(StepType type) {
         case StepType::If: return "if";
         case StepType::Loop: return "loop";
         case StepType::HttpRequest: return "http_request";
+        case StepType::LaunchApp: return "launch_app";
     }
     return "wait";
 }
@@ -69,6 +106,7 @@ bool parseStepType(const std::string& text, StepType& out) {
         {"if", StepType::If},
         {"loop", StepType::Loop},
         {"http_request", StepType::HttpRequest},
+        {"launch_app", StepType::LaunchApp},
     };
     auto it = kMap.find(text);
     if (it == kMap.end()) return false;
@@ -106,6 +144,16 @@ void validateTarget(const Step& step,
             }
             break;
         case TargetKind::Point:
+            break;
+        case TargetKind::Relative:
+            if (target.text.empty()) {
+                issues.push_back(
+                    {step.id, std::string(what) + ": relative target needs the anchor's text"});
+            }
+            if (target.maxDistance <= 0) {
+                issues.push_back(
+                    {step.id, std::string(what) + ": max_distance must be greater than zero"});
+            }
             break;
     }
     if (target.retry.times < 0) {
@@ -213,6 +261,11 @@ void validateSteps(const StepList& steps,
                     issues.push_back({step.id, "http_request needs a url"});
                 } else if (step.url.rfind("http://", 0) != 0 && step.url.rfind("https://", 0) != 0) {
                     issues.push_back({step.id, "http_request url must start with http:// or https://"});
+                }
+                break;
+            case StepType::LaunchApp:
+                if (step.path.empty()) {
+                    issues.push_back({step.id, "launch_app needs a path"});
                 }
                 break;
         }

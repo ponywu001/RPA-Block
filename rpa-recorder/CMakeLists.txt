@@ -2,6 +2,7 @@ add_library(rpa-recorder STATIC
     src/Recorder.cpp
     src/RecordedEvent.cpp
     src/UiaInspector.cpp
+    src/UiaLocator.cpp
 )
 
 add_library(rpa::recorder ALIAS rpa-recorder)

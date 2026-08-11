@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include "rpa/ai/OutputSchema.h"
+#include "rpa/ai/ReplyDecoder.h"
 #include "rpa/core/ScriptIO.h"
 
 namespace rpa::ai {
@@ -48,65 +49,6 @@ json makeImageBlock(const std::vector<unsigned char>& png) {
     const std::string dataUri =
         "data:image/png;base64," + raw.toBase64().toStdString();
     return json{{"type", "image_url"}, {"image_url", json{{"url", dataUri}}}};
-}
-
-/// Rebuild IR steps from the agent's described_object rows. Each row's
-/// `params_json` is re-parsed and validated; a bad row is reported rather than
-/// discarding the whole draft.
-void decodeSteps(const json& steps, AgentReply& reply) {
-    if (!steps.is_array()) return;
-
-    int index = 0;
-    for (const auto& entry : steps) {
-        ++index;
-        if (!entry.is_object()) {
-            reply.stepIssues.push_back("step " + std::to_string(index) + ": not an object");
-            continue;
-        }
-
-        const std::string id = entry.value("id", "step_" + std::to_string(index));
-        const std::string type = entry.value("type", "");
-        const std::string params = entry.value("params_json", "{}");
-        const std::string comment = entry.value("comment", "");
-
-        core::Step step;
-        std::string error;
-        if (!core::parseStepFromParamsJson(id, type, params, comment, step, error)) {
-            reply.stepIssues.push_back("step " + std::to_string(index) + " (" + id + "): " + error);
-            continue;
-        }
-        reply.steps.push_back(std::move(step));
-    }
-}
-
-bool decodeStructuredOutput(const json& state, AgentReply& reply, std::string& error) {
-    auto structured = state.find("structured_output");
-    if (structured == state.end() || !structured->is_object()) {
-        error = "response contained no structured_output";
-        return false;
-    }
-
-    reply.reply = structured->value("reply", "");
-    reply.hasScript = structured->value("has_script", false);
-    reply.scriptName = structured->value("script_name", "");
-
-    auto steps = structured->find("steps");
-    if (steps != structured->end()) decodeSteps(*steps, reply);
-
-    // A turn that claims a script but yielded no usable step is a failure the
-    // user needs to see, not an empty "applied" action.
-    if (reply.hasScript && reply.steps.empty() && reply.stepIssues.empty()) {
-        reply.stepIssues.push_back("has_script was true but the steps list was empty");
-    }
-
-    auto usage = state.find("usage_cost");
-    if (usage != state.end() && usage->is_object()) {
-        reply.costUsd = usage->value("cost", 0.0);
-        reply.inputTokens = usage->value("input_tokens", 0);
-        reply.outputTokens = usage->value("output_tokens", 0);
-    }
-
-    return true;
 }
 
 }  // namespace
@@ -204,10 +146,16 @@ void AgentClient::testConnection() {
     startStream(QByteArray::fromStdString(body.dump()), true);
 }
 
+void AgentClient::setRawStreamTap(std::function<void(const QByteArray&)> tap) {
+    rawStreamTap_ = std::move(tap);
+}
+
 void AgentClient::startStream(const QByteArray& payload, bool isProbe) {
     probeRequest_ = isProbe;
-    streamBuffer_.clear();
+    parser_.reset();
     lastValuesPayload_.clear();
+    lastStructuredPayload_.clear();
+    rawBody_.clear();
 
     QUrl url(QString::fromStdString(settings_.gatewayUrl));
     url.setPath(url.path() + QStringLiteral("/runs/stream"));
@@ -217,6 +165,10 @@ void AgentClient::startStream(const QByteArray& payload, bool isProbe) {
     request.setRawHeader("Accept", "text/event-stream");
     applyAuthHeaders(request);
     request.setTransferTimeout(settings_.timeoutMs);
+    // A redirect would be replayed as a GET with the body dropped, which reaches
+    // the gateway as an empty request and fails in a way that points nowhere.
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::SameOriginRedirectPolicy);
 
     activeReply_ = network_->post(request, payload);
 
@@ -226,47 +178,37 @@ void AgentClient::startStream(const QByteArray& payload, bool isProbe) {
 
 void AgentClient::consumeStreamChunk() {
     if (!activeReply_) return;
-    streamBuffer_.append(activeReply_->readAll());
-    drainStreamBuffer();
+
+    const QByteArray chunk = activeReply_->readAll();
+    if (chunk.isEmpty()) return;
+    if (rawStreamTap_) rawStreamTap_(chunk);
+    rawBody_.append(chunk.constData(), static_cast<size_t>(chunk.size()));
+
+    std::vector<SseEvent> events;
+    parser_.feed(std::string_view(chunk.constData(), static_cast<size_t>(chunk.size())), events);
+    dispatchEvents(events);
 }
 
-void AgentClient::drainStreamBuffer() {
-    // Normalise line endings first. SSE permits CRLF, and "\r\n\r\n" contains
-    // no "\n\n" substring — without this the frame scan below would never match
-    // a single frame on a CRLF stream.
-    streamBuffer_.replace("\r\n", "\n");
-
-    // Frames are separated by a blank line. Parse whole frames only; a partial
-    // tail stays buffered for the next chunk.
-    int separator = 0;
-    while ((separator = streamBuffer_.indexOf("\n\n")) >= 0) {
-        const QByteArray frame = streamBuffer_.left(separator);
-        streamBuffer_.remove(0, separator + 2);
-
-        QByteArray eventName;
-        QByteArray data;
-        for (const QByteArray& rawLine : frame.split('\n')) {
-            QByteArray line = rawLine.trimmed();
-            if (line.startsWith("event:")) {
-                eventName = line.mid(6).trimmed();
-            } else if (line.startsWith("data:")) {
-                if (!data.isEmpty()) data.append('\n');
-                data.append(line.mid(5).trimmed());
-            }
-        }
-        if (data.isEmpty()) continue;
-
-        if (eventName == "values") {
-            // Keep only the latest; the terminal snapshot is the one that
-            // carries structured_output and usage_cost.
-            lastValuesPayload_ = data;
+void AgentClient::dispatchEvents(const std::vector<SseEvent>& events) {
+    for (const SseEvent& event : events) {
+        if (event.name == "values") {
+            lastValuesPayload_ = event.data;
+            if (payloadHasStructuredOutput(event.data)) lastStructuredPayload_ = event.data;
             emit progress(tr("Receiving agent state…"));
-        } else if (eventName == "error") {
+        } else if (event.name == "error") {
             emit progress(tr("Agent reported an error."));
-            lastValuesPayload_ = data;
-        } else if (eventName == "metadata") {
+            lastValuesPayload_ = event.data;
+        } else if (event.name == "metadata") {
             emit progress(tr("Run started."));
         }
+    }
+}
+
+void AgentClient::reportFailure(const QString& detail, int status) {
+    if (probeRequest_) {
+        emit connectionTested(false, detail);
+    } else {
+        emit failed({detail.toStdString(), status});
     }
 }
 
@@ -278,11 +220,16 @@ void AgentClient::handleStreamFinished() {
     // without a trailing blank line leaves the terminal `values` frame — the one
     // carrying structured_output — sitting in the buffer, so skipping this makes
     // a perfectly good run look like "the gateway returned no state events".
-    streamBuffer_.append(reply->readAll());
-    if (!streamBuffer_.trimmed().isEmpty()) {
-        streamBuffer_.append("\n\n");
-        drainStreamBuffer();
+    const QByteArray tail = reply->readAll();
+    if (!tail.isEmpty()) {
+        if (rawStreamTap_) rawStreamTap_(tail);
+        rawBody_.append(tail.constData(), static_cast<size_t>(tail.size()));
     }
+
+    std::vector<SseEvent> events;
+    parser_.feed(std::string_view(tail.constData(), static_cast<size_t>(tail.size())), events);
+    parser_.flush(events);
+    dispatchEvents(events);
 
     activeReply_ = nullptr;
 
@@ -292,41 +239,43 @@ void AgentClient::handleStreamFinished() {
     const QString networkErrorText = reply->errorString();
     reply->deleteLater();
 
-    if (networkError != QNetworkReply::NoError && lastValuesPayload_.isEmpty()) {
-        const QString detail = status > 0
+    // Prefer the last snapshot that actually carried a result. Falling back to
+    // the last `values` of any shape keeps error events reportable.
+    const std::string& payload =
+        lastStructuredPayload_.empty() ? lastValuesPayload_ : lastStructuredPayload_;
+
+    // Gated on the *structured* payload, not on any payload: the gateway emits
+    // intermediate `values` snapshots that carry no result, so a stream cut off
+    // mid-run has something buffered and would otherwise be reported as "the
+    // gateway returned no structured_output" — sending the user to look at the
+    // gateway when what actually happened was a timeout.
+    if (networkError != QNetworkReply::NoError && lastStructuredPayload_.empty()) {
+        // An HTTP error answers with a JSON body, not SSE, so nothing above
+        // parsed it. That body says whether the key or the payload was wrong;
+        // Qt's errorString only says "the host requires authentication".
+        const std::string serverDetail = extractErrorDetail(rawBody_);
+
+        // A stream cut off mid-run still carries the 200 from its headers.
+        // Quoting it reads as "the request succeeded", so the status is only
+        // named when it is itself the complaint.
+        const bool statusIsTheProblem = status >= 400;
+        QString detail = statusIsTheProblem
             ? tr("HTTP %1: %2").arg(status).arg(networkErrorText)
             : networkErrorText;
-        if (probeRequest_) {
-            emit connectionTested(false, detail);
-        } else {
-            emit failed({detail.toStdString(), status});
+        if (!serverDetail.empty()) {
+            detail += QStringLiteral(" — ") + QString::fromStdString(serverDetail);
         }
+        reportFailure(detail, statusIsTheProblem ? status : 0);
         return;
     }
 
-    if (lastValuesPayload_.isEmpty()) {
-        const QString detail = tr("The gateway returned no state events.");
-        if (probeRequest_) {
-            emit connectionTested(false, detail);
-        } else {
-            emit failed({detail.toStdString(), status});
-        }
-        return;
-    }
-
-    json state = json::parse(lastValuesPayload_.toStdString(), nullptr, false);
-    if (state.is_discarded()) {
-        const QString detail = tr("Could not parse the gateway's final state payload.");
-        if (probeRequest_) {
-            emit connectionTested(false, detail);
-        } else {
-            emit failed({detail.toStdString(), status});
-        }
+    if (payload.empty()) {
+        reportFailure(tr("The gateway returned no state events."), status);
         return;
     }
 
     if (probeRequest_) {
-        const bool ok = state.contains("structured_output");
+        const bool ok = payloadHasStructuredOutput(payload);
         emit connectionTested(ok, ok ? tr("Connected. The gateway answered with a valid "
                                           "structured result.")
                                      : tr("Reached the gateway, but it returned no "
@@ -336,8 +285,8 @@ void AgentClient::handleStreamFinished() {
 
     AgentReply parsed;
     std::string error;
-    if (!decodeStructuredOutput(state, parsed, error)) {
-        emit failed({error, status});
+    if (!decodeAgentState(payload, parsed, error)) {
+        reportFailure(QString::fromStdString(error), status);
         return;
     }
 

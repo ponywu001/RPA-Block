@@ -43,6 +43,11 @@ json dumpRunRecord(const RunRecord& record) {
         record.currentStepId.empty() ? json(nullptr) : json(record.currentStepId);
     if (!record.failedStepId.empty()) j["failed_step"] = record.failedStepId;
     if (!record.error.empty()) j["error"] = record.error;
+    // A path on the machine that ran the flow, not a download link. The image
+    // stays local; the caller gets told where an operator can find it.
+    if (!record.failureScreenshotPath.empty()) {
+        j["failure_screenshot"] = record.failureScreenshotPath;
+    }
     return j;
 }
 
@@ -94,6 +99,31 @@ struct ApiServer::Impl {
     std::thread dispatcher;
     std::atomic<bool> stopping{false};
 
+    // --- Failed-authentication throttle -------------------------------------
+    // Counted globally rather than per caller: behind a tunnel every request
+    // arrives from 127.0.0.1, so a per-address limit would be one bucket anyway
+    // while pretending to be several.
+    //
+    // Only *failures* are counted and only failures are ever refused, so a
+    // caller holding a valid key is never affected by someone else guessing --
+    // which is what stops this from being a way to lock the owner out.
+    mutable std::mutex authMutex;
+    mutable std::deque<std::chrono::steady_clock::time_point> authFailures;
+
+    static constexpr std::chrono::seconds kAuthWindow{60};
+    static constexpr size_t kMaxAuthFailures = 10;
+
+    /// Records a rejected key and reports whether the window is now saturated.
+    bool tooManyAuthFailures() const {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(authMutex);
+        while (!authFailures.empty() && now - authFailures.front() > kAuthWindow) {
+            authFailures.pop_front();
+        }
+        authFailures.push_back(now);
+        return authFailures.size() > kMaxAuthFailures;
+    }
+
     Impl(ScriptRepository* repo, RunStore* store) : repository(repo), runStore(store) {}
 
     void dispatchLoop();
@@ -124,6 +154,19 @@ struct ApiServer::Impl {
 
         const std::string provided = request.get_header_value("X-API-Key");
         if (provided.empty() || keys.find(provided) == keys.end()) {
+            if (tooManyAuthFailures()) {
+                // Matters once this server is reachable from the internet, where
+                // nothing else limits how fast a key can be guessed at.
+                response.status = 429;
+                response.set_header("Retry-After",
+                                    std::to_string(kAuthWindow.count()));
+                response.set_content(
+                    errorBody("rate_limited",
+                              "Too many failed authentication attempts. Try again later.")
+                        .dump(),
+                    kJsonContentType);
+                return false;
+            }
             response.status = 401;
             response.set_content(
                 errorBody("authentication_error", "Missing or invalid X-API-Key header.").dump(),
@@ -582,13 +625,33 @@ int ApiServer::boundPort() const {
 }
 
 std::string ApiServer::generateApiKey() {
-    static thread_local std::mt19937 engine{std::random_device{}()};
     static const char* kAlphabet =
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    std::uniform_int_distribution<int> pick(0, 61);
+    constexpr int kAlphabetSize = 62;
+    constexpr int kKeyChars = 32;
 
+    // Drawn straight from the OS entropy source rather than seeding a PRNG.
+    //
+    // This used to be an mt19937 seeded with one std::random_device value, which
+    // made the key *look* like 62^32 of search space while there were only 2^32
+    // possible streams -- the seed was the only unknown. That is fine for a
+    // token on a loopback-only port and badly wrong for one that guards a
+    // machine's mouse and keyboard from the public internet, which is what this
+    // key does the moment a tunnel or a 0.0.0.0 bind is switched on.
     std::string key = "sk-pra-";
-    for (int i = 0; i < 32; ++i) key += kAlphabet[pick(engine)];
+    key.reserve(key.size() + kKeyChars);
+
+    std::random_device entropy;
+    // Rejection sampling: 2^32 is not a multiple of 62, so folding the raw draw
+    // with % would make the first few letters marginally likelier than the rest.
+    const unsigned int limit =
+        entropy.max() - (entropy.max() % static_cast<unsigned int>(kAlphabetSize));
+
+    for (int i = 0; i < kKeyChars; ++i) {
+        unsigned int draw = entropy();
+        while (draw >= limit) draw = entropy();
+        key += kAlphabet[draw % static_cast<unsigned int>(kAlphabetSize)];
+    }
     return key;
 }
 

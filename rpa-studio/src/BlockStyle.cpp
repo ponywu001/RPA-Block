@@ -1,5 +1,6 @@
 #include "BlockStyle.h"
 
+#include <QMap>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPolygonF>
@@ -22,6 +23,7 @@ BlockCategory categoryOf(core::StepType type) {
         case core::StepType::OcrFind:
         case core::StepType::ImageFind:
             return BlockCategory::Vision;
+        case core::StepType::LaunchApp:
         case core::StepType::WindowActivate:
         case core::StepType::Screenshot:
             return BlockCategory::Window;
@@ -148,6 +150,7 @@ QString stepLabel(core::StepType type) {
         case core::StepType::If: return QStringLiteral("如果");
         case core::StepType::Loop: return QStringLiteral("重複");
         case core::StepType::HttpRequest: return QStringLiteral("呼叫 API");
+        case core::StepType::LaunchApp: return QStringLiteral("開啟程式");
     }
     return {};
 }
@@ -169,6 +172,27 @@ QString describeTarget(const core::Target& target) {
                        ? QStringLiteral("（尚未選圖）")
                        : QStringLiteral("圖片 %1")
                              .arg(QString::fromStdString(target.templatePath));
+        case core::TargetKind::Relative: {
+            if (target.text.empty()) return QStringLiteral("（尚未設定錨點）");
+            // Reads as the sentence the user thought in, not as field values:
+            // "客戶全稱 右邊的 輸入框".
+            static const QMap<core::Direction, QString> kWhere{
+                {core::Direction::Right, QStringLiteral("右邊")},
+                {core::Direction::Left, QStringLiteral("左邊")},
+                {core::Direction::Above, QStringLiteral("上面")},
+                {core::Direction::Below, QStringLiteral("下面")},
+            };
+            static const QMap<core::ElementRole, QString> kWhat{
+                {core::ElementRole::Input, QStringLiteral("輸入框")},
+                {core::ElementRole::Button, QStringLiteral("按鈕")},
+                {core::ElementRole::Checkbox, QStringLiteral("勾選方塊")},
+                {core::ElementRole::Any, QStringLiteral("控制項")},
+            };
+            return QStringLiteral("「%1」%2的%3")
+                .arg(QString::fromStdString(target.text),
+                     kWhere.value(target.direction),
+                     kWhat.value(target.role));
+        }
         case core::TargetKind::Point:
             return QStringLiteral("座標 (%1, %2)").arg(target.point.x).arg(target.point.y);
     }
@@ -241,6 +265,19 @@ QString stepSummary(const core::Step& step) {
                        ? QStringLiteral("（尚未設定網址）")
                        : QStringLiteral("%1 %2").arg(QString::fromStdString(step.httpMethod),
                                                      QString::fromStdString(step.url));
+        case core::StepType::LaunchApp: {
+            if (step.path.empty()) return QStringLiteral("（尚未設定程式路徑）");
+            // The block body is a single line, and a full install path elides
+            // into uselessness. The executable name is what identifies the step.
+            const QString full = QString::fromStdString(step.path);
+            const int slash = std::max(full.lastIndexOf(QLatin1Char('\\')),
+                                       full.lastIndexOf(QLatin1Char('/')));
+            const QString name = slash >= 0 ? full.mid(slash + 1) : full;
+            return step.launchArgs.empty()
+                       ? name
+                       : QStringLiteral("%1 %2").arg(name,
+                                                     QString::fromStdString(step.launchArgs));
+        }
     }
     return {};
 }
@@ -400,6 +437,28 @@ void paintLoop(IconPainter g) {
     g.p.drawPolygon(head);
 }
 
+void paintLaunch(IconPainter g) {
+    g.p.setBrush(Qt::NoBrush);
+    QPen pen = g.p.pen();
+    pen.setWidthF(g.scaled(0.09));
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    g.p.setPen(pen);
+
+    // A window frame with its top-right corner left open and an arrow leaving
+    // through the gap -- the "open this elsewhere" glyph, deliberately distinct
+    // from the filled frame that `window_activate` uses.
+    QPolygonF frame;
+    frame << g.at(0.56, 0.16) << g.at(0.14, 0.16) << g.at(0.14, 0.86) << g.at(0.86, 0.86)
+          << g.at(0.86, 0.46);
+    g.p.drawPolyline(frame);
+
+    g.p.drawLine(g.at(0.50, 0.52), g.at(0.86, 0.16));
+    QPolygonF head;
+    head << g.at(0.60, 0.14) << g.at(0.88, 0.14) << g.at(0.88, 0.42);
+    g.p.drawPolyline(head);
+}
+
 void paintGlobe(IconPainter g) {
     g.p.setBrush(Qt::NoBrush);
     QPen pen = g.p.pen();
@@ -437,6 +496,7 @@ void paintStepIcon(QPainter& painter, const QRect& box, core::StepType type, con
         case core::StepType::If: paintBranch(g); break;
         case core::StepType::Loop: paintLoop(g); break;
         case core::StepType::HttpRequest: paintGlobe(g); break;
+        case core::StepType::LaunchApp: paintLaunch(g); break;
     }
 
     painter.restore();

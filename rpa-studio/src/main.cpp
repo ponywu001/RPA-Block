@@ -9,6 +9,7 @@
 #include "MainWindow.h"
 #include "StandardButtons.h"
 #include "ScreenGeometryDump.h"
+#include "UiaTreeDump.h"
 
 int main(int argc, char** argv) {
     // PassThrough keeps the exact fractional scale factor instead of rounding
@@ -59,6 +60,38 @@ int main(int argc, char** argv) {
         QStringLiteral("把螢幕幾何診斷寫到指定檔案後結束。座標問題請先看這份輸出。"),
         QStringLiteral("檔案"));
     parser.addOption(dumpGeometryOption);
+    const QCommandLineOption dumpUiaOption(
+        QStringLiteral("dump-uia"),
+        QStringLiteral("把某個視窗的 UI Automation 控制項樹寫到指定檔案後結束。"
+                       "要用 UIA 定位欄位前，先看這份輸出確認那支程式暴露了什麼。"),
+        QStringLiteral("檔案"));
+    parser.addOption(dumpUiaOption);
+    const QCommandLineOption uiaWindowOption(
+        QStringLiteral("uia-window"),
+        QStringLiteral("--dump-uia 的對象視窗，比對標題（包含即可）。省略則用最前景的視窗。"),
+        QStringLiteral("標題"));
+    parser.addOption(uiaWindowOption);
+    const QCommandLineOption uiaDelayOption(
+        QStringLiteral("uia-delay"),
+        QStringLiteral("--dump-uia 開始前等待的秒數，讓你有時間把目標視窗切到最前面。"),
+        QStringLiteral("秒數"), QStringLiteral("0"));
+    parser.addOption(uiaDelayOption);
+    const QCommandLineOption probeRelativeOption(
+        QStringLiteral("probe-relative"),
+        QStringLiteral("測試「某個標籤旁邊的控制項」定位得到嗎，只印結果不點擊。"
+                       "搭配 --uia-direction / --uia-element / --uia-delay。"),
+        QStringLiteral("標籤文字"));
+    parser.addOption(probeRelativeOption);
+    const QCommandLineOption uiaDirectionOption(
+        QStringLiteral("uia-direction"),
+        QStringLiteral("--probe-relative 的方位：right / left / above / below。"),
+        QStringLiteral("方位"), QStringLiteral("right"));
+    parser.addOption(uiaDirectionOption);
+    const QCommandLineOption uiaElementOption(
+        QStringLiteral("uia-element"),
+        QStringLiteral("--probe-relative 要找的控制項：any / input / button / checkbox。"),
+        QStringLiteral("種類"), QStringLiteral("input"));
+    parser.addOption(uiaElementOption);
     parser.process(app);
 
     // Coordinate bugs in this app are all about the gap between Qt's logical
@@ -66,6 +99,27 @@ int main(int argc, char** argv) {
     // invisible in a screenshot. Dumping both views makes it measurable.
     if (parser.isSet(dumpGeometryOption)) {
         return rpa::studio::dumpScreenGeometry(parser.value(dumpGeometryOption)) ? 0 : 1;
+    }
+
+    // What an application exposes to automation cannot be seen from a
+    // screenshot, and a locator written against a guess about it works only on
+    // the machine it was written on.
+    if (parser.isSet(dumpUiaOption)) {
+        return rpa::studio::dumpUiaTree(parser.value(dumpUiaOption),
+                                        parser.value(uiaWindowOption),
+                                        parser.value(uiaDelayOption).toInt())
+                   ? 0
+                   : 1;
+    }
+
+    if (parser.isSet(probeRelativeOption)) {
+        return rpa::studio::probeRelativeTarget(parser.value(probeRelativeOption),
+                                                parser.value(uiaDirectionOption),
+                                                parser.value(uiaElementOption), 400,
+                                                parser.value(uiaDelayOption).toInt(),
+                                                parser.value(uiaWindowOption))
+                   ? 0
+                   : 1;
     }
 
     rpa::studio::MainWindow window;

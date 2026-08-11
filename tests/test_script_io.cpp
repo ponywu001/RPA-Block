@@ -88,6 +88,58 @@ RPA_TEST(round_trips_through_serialize_and_parse) {
     CHECK_EQ(serializeScript(second.script), serialized);
 }
 
+RPA_TEST(round_trips_launch_app_with_its_optional_fields) {
+    const ParseResult result = parseScript(R"JSON({
+      "name": "open-erp", "version": 1, "steps": [
+        { "id": "open", "type": "launch_app",
+          "path": "C:\\Program Files\\ERP\\erp.exe",
+          "args": "--profile prod", "working_dir": "C:\\Program Files\\ERP" }
+      ]})JSON");
+    CHECK(result.ok);
+    CHECK_EQ(result.issues.size(), size_t{0});
+
+    const Step& step = result.script.steps[0];
+    CHECK(step.type == StepType::LaunchApp);
+    CHECK_EQ(step.path, std::string{"C:\\Program Files\\ERP\\erp.exe"});
+    CHECK_EQ(step.launchArgs, std::string{"--profile prod"});
+    CHECK_EQ(step.workingDir, std::string{"C:\\Program Files\\ERP"});
+
+    const std::string serialized = serializeScript(result.script);
+    const ParseResult second = parseScript(serialized);
+    CHECK(second.ok);
+    CHECK_EQ(serializeScript(second.script), serialized);
+}
+
+RPA_TEST(omits_the_optional_launch_app_fields_when_unset) {
+    // `args` and `working_dir` are optional, and writing them out as empty
+    // strings would leave every hand-read flow noisier than it needs to be.
+    Script script;
+    script.name = "open";
+    Step step;
+    step.id = "open";
+    step.type = StepType::LaunchApp;
+    step.path = "notepad.exe";
+    script.steps.push_back(step);
+
+    const std::string serialized = serializeScript(script);
+    CHECK(serialized.find("\"path\"") != std::string::npos);
+    CHECK(serialized.find("\"args\"") == std::string::npos);
+    CHECK(serialized.find("\"working_dir\"") == std::string::npos);
+}
+
+RPA_TEST(reports_launch_app_without_a_path) {
+    const ParseResult result = parseScript(R"JSON({
+      "name": "bad", "version": 1, "steps": [
+        { "id": "a", "type": "launch_app", "args": "--now" }
+      ]})JSON");
+    CHECK(result.ok);
+    bool found = false;
+    for (const auto& issue : result.issues) {
+        if (issue.message.find("launch_app needs a path") != std::string::npos) found = true;
+    }
+    CHECK(found);
+}
+
 RPA_TEST(rejects_malformed_json) {
     const ParseResult result = parseScript("{ not json");
     CHECK(!result.ok);
@@ -162,4 +214,61 @@ RPA_TEST(rejects_ai_step_with_broken_params_json) {
     std::string error;
     CHECK(!parseStepFromParamsJson("x", "wait", "{oops", "", step, error));
     CHECK(error.find("not valid JSON") != std::string::npos);
+}
+
+RPA_TEST(relative_target_survives_a_round_trip) {
+    Script script;
+    script.name = "relative";
+    Step click;
+    click.id = "fill_name";
+    click.type = StepType::Click;
+    click.target.kind = TargetKind::Relative;
+    click.target.text = "客戶全稱";
+    click.target.match = MatchMode::Contains;
+    click.target.direction = Direction::Right;
+    click.target.role = ElementRole::Input;
+    click.target.maxDistance = 250;
+    script.steps.push_back(click);
+
+    const ParseResult reloaded = parseScript(serializeScript(script));
+    CHECK(reloaded.ok);
+
+    const Target& t = reloaded.script.steps.front().target;
+    CHECK_EQ(static_cast<int>(t.kind), static_cast<int>(TargetKind::Relative));
+    CHECK_EQ(t.text, std::string("客戶全稱"));
+    CHECK_EQ(static_cast<int>(t.direction), static_cast<int>(Direction::Right));
+    CHECK_EQ(static_cast<int>(t.role), static_cast<int>(ElementRole::Input));
+    CHECK_EQ(t.maxDistance, 250);
+}
+
+RPA_TEST(relative_target_without_an_anchor_is_a_validation_issue) {
+    Script script;
+    script.name = "no anchor";
+    Step click;
+    click.id = "click";
+    click.type = StepType::Click;
+    click.target.kind = TargetKind::Relative;
+    click.target.text = "";
+    script.steps.push_back(click);
+
+    const auto issues = validate(script);
+    CHECK(!issues.empty());
+}
+
+RPA_TEST(every_direction_and_role_round_trips_through_its_name) {
+    // Guards the enum-to-string tables: a value that serialises to something
+    // parseDirection does not accept would silently come back as "right" on
+    // reload, quietly retargeting a step at the other side of the form.
+    for (int i = 0; i < 4; ++i) {
+        const auto direction = static_cast<Direction>(i);
+        Direction parsed = Direction::Below;
+        CHECK(parseDirection(toString(direction), parsed));
+        CHECK_EQ(static_cast<int>(parsed), i);
+    }
+    for (int i = 0; i < 4; ++i) {
+        const auto role = static_cast<ElementRole>(i);
+        ElementRole parsed = ElementRole::Button;
+        CHECK(parseElementRole(toString(role), parsed));
+        CHECK_EQ(static_cast<int>(parsed), i);
+    }
 }

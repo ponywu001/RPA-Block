@@ -1,7 +1,10 @@
 #include "rpa/recorder/UiaInspector.h"
 
 #include <map>
+#include <string>
 #include <vector>
+
+#include "rpa/core/TextMatch.h"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -34,6 +37,15 @@ public:
     ComPtr(const ComPtr&) = delete;
     ComPtr& operator=(const ComPtr&) = delete;
     ComPtr(ComPtr&& other) noexcept : ptr_(other.ptr_) { other.ptr_ = nullptr; }
+
+    ComPtr& operator=(ComPtr&& other) noexcept {
+        if (this != &other) {
+            reset();
+            ptr_ = other.ptr_;
+            other.ptr_ = nullptr;
+        }
+        return *this;
+    }
 
     T** put() { reset(); return &ptr_; }
     T* get() const { return ptr_; }
@@ -247,6 +259,312 @@ ElementInfo inspectFocusedElement() {
     return info;
 }
 
+namespace {
+
+/// Find a top-level window whose title contains `filter`, or the foreground one
+/// when the filter is empty.
+HWND windowForDump(const std::string& filter) {
+    if (filter.empty()) return GetForegroundWindow();
+
+    struct Search {
+        std::string needle;
+        HWND found = nullptr;
+    } search{filter};
+
+    EnumWindows(
+        [](HWND hwnd, LPARAM param) -> BOOL {
+            auto* state = reinterpret_cast<Search*>(param);
+            if (!IsWindowVisible(hwnd)) return TRUE;
+            const int length = GetWindowTextLengthW(hwnd);
+            if (length <= 0) return TRUE;
+            std::wstring title(static_cast<size_t>(length) + 1, L'\0');
+            const int copied = GetWindowTextW(hwnd, title.data(), length + 1);
+            title.resize(static_cast<size_t>(copied));
+            if (wideToUtf8(title).find(state->needle) != std::string::npos) {
+                state->found = hwnd;
+                return FALSE;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+
+    return search.found;
+}
+
+void describe(IUIAutomationElement* element, int depth, UiaNode& node) {
+    node.depth = depth;
+
+    ComPtr<IUIAutomationElement> labeller;
+    if (SUCCEEDED(element->get_CurrentLabeledBy(labeller.put())) && labeller) {
+        BSTR text = nullptr;
+        if (SUCCEEDED(labeller->get_CurrentName(&text))) {
+            node.labeledBy = bstrToUtf8(text);
+            SysFreeString(text);
+        }
+    }
+
+    BSTR value = nullptr;
+    if (SUCCEEDED(element->get_CurrentName(&value))) {
+        node.name = bstrToUtf8(value);
+        SysFreeString(value);
+    }
+    if (SUCCEEDED(element->get_CurrentAutomationId(&value))) {
+        node.automationId = bstrToUtf8(value);
+        SysFreeString(value);
+    }
+    if (SUCCEEDED(element->get_CurrentClassName(&value))) {
+        node.className = bstrToUtf8(value);
+        SysFreeString(value);
+    }
+
+    CONTROLTYPEID type = 0;
+    if (SUCCEEDED(element->get_CurrentControlType(&type))) {
+        node.controlType = controlTypeName(type);
+    }
+
+    BOOL flag = FALSE;
+    if (SUCCEEDED(element->get_CurrentIsKeyboardFocusable(&flag))) {
+        node.keyboardFocusable = flag != FALSE;
+    }
+    if (SUCCEEDED(element->get_CurrentIsOffscreen(&flag))) {
+        node.offscreen = flag != FALSE;
+    }
+
+    RECT rect{};
+    if (SUCCEEDED(element->get_CurrentBoundingRectangle(&rect))) {
+        node.bounds = core::Rect{rect.left, rect.top, rect.right - rect.left,
+                                 rect.bottom - rect.top};
+    }
+}
+
+void walk(IUIAutomation* automation,
+          IUIAutomationTreeWalker* walker,
+          IUIAutomationElement* element,
+          int depth,
+          int maxDepth,
+          int maxNodes,
+          std::vector<UiaNode>& out) {
+    if (!element || depth > maxDepth || static_cast<int>(out.size()) >= maxNodes) return;
+
+    UiaNode node;
+    describe(element, depth, node);
+    out.push_back(node);
+
+    ComPtr<IUIAutomationElement> child;
+    if (FAILED(walker->GetFirstChildElement(element, child.put())) || !child) return;
+
+    while (child && static_cast<int>(out.size()) < maxNodes) {
+        walk(automation, walker, child.get(), depth + 1, maxDepth, maxNodes, out);
+
+        ComPtr<IUIAutomationElement> sibling;
+        if (FAILED(walker->GetNextSiblingElement(child.get(), sibling.put())) || !sibling) break;
+        child = std::move(sibling);
+    }
+}
+
+}  // namespace
+
+std::vector<UiaNode> dumpWindowTree(const std::string& titleFilter,
+                                    int maxDepth,
+                                    int maxNodes,
+                                    std::string& error) {
+    std::vector<UiaNode> nodes;
+
+    IUIAutomation* automation = threadAutomation();
+    if (!automation) {
+        error = "UI Automation is unavailable on this system";
+        return nodes;
+    }
+
+    HWND hwnd = windowForDump(titleFilter);
+    if (!hwnd) {
+        error = titleFilter.empty() ? "no foreground window"
+                                    : "no visible window whose title contains: " + titleFilter;
+        return nodes;
+    }
+
+    ComPtr<IUIAutomationElement> root;
+    if (FAILED(automation->ElementFromHandle(hwnd, root.put())) || !root) {
+        error = "UI Automation could not describe that window";
+        return nodes;
+    }
+
+    // The control view rather than the raw view: the raw tree is full of
+    // presentational nodes that no automation would ever target, and on a big
+    // form that is the difference between a readable dump and thousands of
+    // lines of noise.
+    ComPtr<IUIAutomationTreeWalker> walker;
+    if (FAILED(automation->get_ControlViewWalker(walker.put())) || !walker) {
+        error = "UI Automation has no control-view walker";
+        return nodes;
+    }
+
+    walk(automation, walker.get(), root.get(), 0, maxDepth, maxNodes, nodes);
+    return nodes;
+}
+
+namespace {
+
+bool roleAccepts(core::ElementRole role, const std::string& controlType, bool focusable) {
+    switch (role) {
+        case core::ElementRole::Input:
+            // ComboBox counts: to someone filling in a form, a drop-down is
+            // another thing you put a value into.
+            return controlType == "Edit" || controlType == "ComboBox" ||
+                   controlType == "Document";
+        case core::ElementRole::Button:
+            return controlType == "Button" || controlType == "Hyperlink";
+        case core::ElementRole::Checkbox:
+            return controlType == "CheckBox" || controlType == "RadioButton";
+        case core::ElementRole::Any:
+            // Anything a user could interact with, minus the containers that
+            // are focusable only because their children are.
+            return focusable && controlType != "Pane" && controlType != "Window" &&
+                   controlType != "Group";
+    }
+    return false;
+}
+
+int centreX(const core::Rect& r) { return r.x + r.width / 2; }
+int centreY(const core::Rect& r) { return r.y + r.height / 2; }
+
+/// Distance from the anchor to a candidate in the wanted direction, or -1 when
+/// the candidate is not in that direction at all.
+///
+/// Requires the two to overlap on the perpendicular axis, which is what stops a
+/// field from a different row being picked just because it is nearer in a
+/// straight line.
+int directedDistance(const core::Rect& anchor, const core::Rect& candidate,
+                     core::Direction direction) {
+    const bool overlapsVertically =
+        candidate.y < anchor.y + anchor.height && anchor.y < candidate.y + candidate.height;
+    const bool overlapsHorizontally =
+        candidate.x < anchor.x + anchor.width && anchor.x < candidate.x + candidate.width;
+
+    switch (direction) {
+        case core::Direction::Right:
+            if (!overlapsVertically) return -1;
+            if (candidate.x < anchor.x + anchor.width / 2) return -1;
+            return candidate.x - (anchor.x + anchor.width);
+        case core::Direction::Left:
+            if (!overlapsVertically) return -1;
+            if (candidate.x + candidate.width > centreX(anchor)) return -1;
+            return anchor.x - (candidate.x + candidate.width);
+        case core::Direction::Below:
+            if (!overlapsHorizontally) return -1;
+            if (candidate.y < anchor.y + anchor.height / 2) return -1;
+            return candidate.y - (anchor.y + anchor.height);
+        case core::Direction::Above:
+            if (!overlapsHorizontally) return -1;
+            if (candidate.y + candidate.height > centreY(anchor)) return -1;
+            return anchor.y - (candidate.y + candidate.height);
+    }
+    return -1;
+}
+
+}  // namespace
+
+UiaMatch findRelativeElement(const std::string& anchorText,
+                             core::MatchMode match,
+                             core::Direction direction,
+                             core::ElementRole role,
+                             int maxDistance,
+                             const std::string& windowTitle) {
+    UiaMatch result;
+
+    std::string error;
+    const auto nodes = dumpWindowTree(windowTitle, 40, 4000, error);
+    if (!error.empty()) {
+        result.diagnosis = error;
+        return result;
+    }
+    if (nodes.empty()) {
+        result.diagnosis = "UI Automation returned no controls for the foreground window";
+        return result;
+    }
+
+    // Strategy 1: the control already carries the label as its own name. A
+    // standard Win32 form does this for free, and when it holds it is exact --
+    // no coordinates, so nothing about layout, font size or DPI can break it.
+    //
+    // Only when exactly one control matches. A `contains` anchor can easily hit
+    // several ("時區" is inside "變更時區(Z)..."), and this strategy has no
+    // notion of direction to tell them apart -- so more than one hit means
+    // falling through to the geometry pass, which does. Taking the first in
+    // tree order would be picking by an accident of the control hierarchy.
+    const UiaNode* named = nullptr;
+    int namedCount = 0;
+    for (const auto& node : nodes) {
+        if (node.offscreen || node.bounds.empty()) continue;
+        if (!roleAccepts(role, node.controlType, node.keyboardFocusable)) continue;
+        if (!core::textMatches(node.name, anchorText, match)) continue;
+        ++namedCount;
+        if (!named) named = &node;
+    }
+
+    if (namedCount == 1) {
+        result.found = true;
+        result.bounds = named->bounds;
+        result.name = named->name;
+        result.controlType = named->controlType;
+        result.strategy = UiaMatchStrategy::ByName;
+        return result;
+    }
+
+    // Strategy 2: find the label itself, then the nearest accepting control in
+    // the requested direction.
+    int roleCount = 0;
+    int anchorCount = 0;
+    int best = -1;
+
+    for (const auto& anchor : nodes) {
+        if (anchor.offscreen || anchor.bounds.empty()) continue;
+        if (!core::textMatches(anchor.name, anchorText, match)) continue;
+        ++anchorCount;
+
+        for (const auto& candidate : nodes) {
+            if (candidate.offscreen || candidate.bounds.empty()) continue;
+            if (!roleAccepts(role, candidate.controlType, candidate.keyboardFocusable)) continue;
+            ++roleCount;
+
+            const int distance = directedDistance(anchor.bounds, candidate.bounds, direction);
+            if (distance < 0 || distance > maxDistance) continue;
+            if (best >= 0 && distance >= best) continue;
+
+            best = distance;
+            result.found = true;
+            result.bounds = candidate.bounds;
+            result.name = candidate.name;
+            result.controlType = candidate.controlType;
+            result.strategy = UiaMatchStrategy::ByGeometry;
+        }
+    }
+
+    if (!result.found) {
+        // Which of the three ways this can fail decides what the user has to
+        // change, so say which one it was rather than "not found".
+        if (namedCount > 1) {
+            // Both passes declined, and the first one declined because the
+            // anchor was not specific enough. Say that, rather than letting it
+            // look like the control is missing.
+            result.diagnosis = std::to_string(namedCount) + " controls match '" + anchorText +
+                               "' and none of them sits " + core::toString(direction) +
+                               " of a label with that text -- make the anchor more specific";
+        } else if (anchorCount == 0) {
+            result.diagnosis = "UI Automation found no element named '" + anchorText + "' in " +
+                               std::to_string(nodes.size()) + " controls";
+        } else if (roleCount == 0) {
+            result.diagnosis = "found the label '" + anchorText +
+                               "' but this window exposes no control of that kind to automation";
+        } else {
+            result.diagnosis = "found the label '" + anchorText + "' but nothing " +
+                               core::toString(direction) + " of it within " +
+                               std::to_string(maxDistance) + "px";
+        }
+    }
+    return result;
+}
+
 core::Rect desktopBounds() {
     core::Rect bounds;
     bounds.x = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -337,6 +655,16 @@ void uninitializeUiaForThread() {}
 ElementInfo inspectElementAt(const core::Point&) { return {}; }
 ElementInfo inspectFocusedElement() { return {}; }
 core::Rect desktopBounds() { return {}; }
+std::vector<UiaNode> dumpWindowTree(const std::string&, int, int, std::string& error) {
+    error = "UI Automation is only available on Windows";
+    return {};
+}
+UiaMatch findRelativeElement(const std::string&, core::MatchMode, core::Direction,
+                             core::ElementRole, int, const std::string&) {
+    UiaMatch match;
+    match.diagnosis = "UI Automation is only available on Windows";
+    return match;
+}
 bool captureRegionToPng(const std::string&, const core::Rect&, std::string& error) {
     error = "screen capture is only implemented on Windows";
     return false;
