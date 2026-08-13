@@ -32,6 +32,7 @@
 #include <algorithm>
 
 #include "ApiPanelDialog.h"
+#include "AuthorGate.h"
 #include "BlockPalette.h"
 #include "BlockStyle.h"
 #include "ChatDock.h"
@@ -150,7 +151,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     restoreLayout();
 
-    newFlow();
+    // Before newFlow(), which is itself gated -- otherwise a locked install
+    // would demand the password to reach an empty canvas at startup.
+    applyAuthoringLock();
+
+    // Not newFlow(): that one asks for the password, and a run-only install
+    // should reach its empty canvas without being challenged for it.
+    resetToEmptyFlow();
     applySettings();
     startApiServerIfConfigured();
     if (settings_.loadOcrOnStartup) loadOcrModels();
@@ -223,12 +230,16 @@ void MainWindow::buildToolbar() {
 void MainWindow::buildMenus() {
     auto* file = menuBar()->addMenu(QStringLiteral("檔案(&F)"));
     file->addAction(QStringLiteral("新增流程"), QKeySequence::New, this, &MainWindow::newFlow);
+    // Opening stays open: a run-only install still has to load the flows it was
+    // given. What it cannot do is write one back.
     file->addAction(QStringLiteral("開啟…"), QKeySequence::Open, this, &MainWindow::openFlow);
     file->addAction(QStringLiteral("儲存"), QKeySequence::Save, this, [this] { saveFlow(); });
     file->addAction(QStringLiteral("另存為…"), QKeySequence::SaveAs, this,
                     [this] { saveFlowAs(); });
     file->addSeparator();
     file->addAction(QStringLiteral("發佈到 API"), this, &MainWindow::publishCurrentFlow);
+    file->addSeparator();
+    unlockAction_ = file->addAction(QString(), this, &MainWindow::toggleAuthoringLock);
     file->addSeparator();
     file->addAction(QStringLiteral("結束"), QKeySequence::Quit, this, &QWidget::close);
 
@@ -344,6 +355,7 @@ void MainWindow::buildDocks() {
 
     leftDock->setWidget(leftPane);
     addDockWidget(Qt::LeftDockWidgetArea, leftDock);
+    authoringDocks_ << leftDock;
 
     // --- Right: properties over the assistant -----------------------------
     auto* rightDock = new QDockWidget(QStringLiteral("積木設定"), this);
@@ -357,6 +369,8 @@ void MainWindow::buildDocks() {
     chat_ = new ChatDock(chatDock);
     chatDock->setWidget(chat_);
     addDockWidget(Qt::RightDockWidgetArea, chatDock);
+    // The assistant writes flows, so it is an authoring tool like the palette.
+    authoringDocks_ << rightDock << chatDock;
 
     // The right column needs real width -- its forms are label + field pairs
     // (template paths, anchor text) that clip and grow a scrollbar when squeezed.
@@ -659,6 +673,64 @@ void MainWindow::startApiServerIfConfigured() {
     }
 }
 
+bool MainWindow::requireAuthoring(const QString& reason) {
+    if (AuthorGate::unlocked()) return true;
+    if (!AuthorGate::promptToUnlock(this, reason)) return false;
+
+    // Unlocking has to put the authoring surface back. Without this the
+    // password appears to do nothing: the palette, the property panel and the
+    // assistant stay hidden, the toolbar stays short, and the canvas goes on
+    // telling the user to drag a block from a list that is not on screen.
+    applyAuthoringLock();
+    return true;
+}
+
+void MainWindow::applyAuthoringLock() {
+    const bool unlocked = AuthorGate::unlocked();
+
+    for (QDockWidget* dock : authoringDocks_) {
+        // Hidden rather than disabled: a greyed-out palette still advertises a
+        // feature this install does not have, and invites someone to go looking
+        // for the password.
+        dock->setVisible(unlocked && dock->isEnabled());
+        dock->toggleViewAction()->setEnabled(unlocked);
+    }
+
+    recordAction_->setVisible(unlocked);
+    saveAction_->setVisible(unlocked);
+
+    editor_->setEmptyHint(
+        unlocked ? QStringLiteral("從左邊的積木清單點兩下，或直接拖過來，\n"
+                                  "就能開始組流程。")
+                 : QStringLiteral("這台電腦只能執行既有流程。\n"
+                                  "用「檔案 → 開啟…」載入流程後按執行。"));
+
+    if (unlockAction_) {
+        unlockAction_->setText(unlocked ? QStringLiteral("鎖定編輯（交機前執行）")
+                                        : QStringLiteral("解鎖編輯…"));
+    }
+
+    updateWindowTitle();
+    updateActionStates();
+}
+
+void MainWindow::toggleAuthoringLock() {
+    if (!AuthorGate::unlocked()) {
+        if (AuthorGate::promptToUnlock(this, QStringLiteral("編輯流程"))) applyAuthoringLock();
+        return;
+    }
+
+    const auto answer = QMessageBox::question(
+        this, QStringLiteral("要鎖定編輯嗎？"),
+        QStringLiteral("鎖定後這台電腦只能執行與發佈既有流程，不能新增或修改，"
+                       "要再解開需要編輯密碼。\n\n現在鎖定嗎？"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes) return;
+
+    AuthorGate::lock();
+    applyAuthoringLock();
+}
+
 void MainWindow::startTunnelIfConfigured() {
     if (!settings_.tunnelAutoStart || !tunnel_ || !api_->isRunning()) return;
 
@@ -711,8 +783,13 @@ void MainWindow::setScript(const core::Script& script, const QString& path) {
 }
 
 void MainWindow::newFlow() {
+    if (!requireAuthoring(QStringLiteral("建立新流程"))) return;
     if (!confirmDiscardChanges()) return;
 
+    resetToEmptyFlow();
+}
+
+void MainWindow::resetToEmptyFlow() {
     core::Script script;
     script.name = "new-flow";
     script.version = 1;
@@ -760,6 +837,7 @@ void MainWindow::openFlowFile(const QString& path) {
 }
 
 bool MainWindow::saveFlow() {
+    if (!requireAuthoring(QStringLiteral("儲存流程"))) return false;
     if (currentPath_.isEmpty()) return saveFlowAs();
 
     std::string error;
@@ -774,6 +852,7 @@ bool MainWindow::saveFlow() {
 }
 
 bool MainWindow::saveFlowAs() {
+    if (!requireAuthoring(QStringLiteral("另存流程"))) return false;
     const QString suggested =
         QDir(settings_.projectDirectory)
             .filePath(QString::fromStdString(editor_->script().name) +
@@ -809,8 +888,14 @@ void MainWindow::updateWindowTitle() {
     const QString name = currentPath_.isEmpty()
                              ? QStringLiteral("未命名")
                              : QFileInfo(currentPath_).fileName();
-    setWindowTitle(QStringLiteral("%1%2 — RPA-Block")
-                       .arg(name, dirty_ ? QStringLiteral("＊") : QString()));
+    // The read-only marker belongs here rather than where the lock is applied:
+    // every save and every file open recomputes this title, and setting it
+    // anywhere else means the marker survives until the first edit and then
+    // quietly disappears.
+    setWindowTitle(QStringLiteral("%1%2 — RPA-Block%3")
+                       .arg(name, dirty_ ? QStringLiteral("＊") : QString(),
+                            AuthorGate::unlocked() ? QString()
+                                                   : QStringLiteral("（唯讀）")));
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -1158,6 +1243,10 @@ void MainWindow::openTargetPicker() {
 // ---------------------------------------------------------------------------
 
 void MainWindow::toggleRecording() {
+    // The recorder exists to produce new flows, so it is authoring.
+    if (!recorder_.isRecording() && !requireAuthoring(QStringLiteral("錄製操作"))) {
+        return;
+    }
     if (recorder_.isRecording()) {
         recorder_.stop();
         if (recordingTimer_) recordingTimer_->stop();
@@ -1348,6 +1437,7 @@ void MainWindow::previewAssistantDraft() {
 }
 
 void MainWindow::applyAssistantDraft() {
+    if (!requireAuthoring(QStringLiteral("套用 AI 草稿"))) return;
     if (!chat_->hasPendingDraft()) return;
 
     core::Script script = editor_->script();
@@ -1368,6 +1458,9 @@ void MainWindow::applyAssistantDraft() {
 // ---------------------------------------------------------------------------
 
 void MainWindow::publishCurrentFlow() {
+    // Publishing is how a flow reaches the API, so an ungated publish
+    // would let a locked install ship whatever is on the canvas.
+    if (!requireAuthoring(QStringLiteral("發佈流程"))) return;
     if (editor_->script().steps.empty()) {
         QMessageBox::warning(this, QStringLiteral("沒有東西可以發佈"),
                              QStringLiteral("這個流程還沒有任何積木。"));

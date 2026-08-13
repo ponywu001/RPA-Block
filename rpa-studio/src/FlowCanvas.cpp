@@ -173,6 +173,12 @@ void FlowCanvas::setScript(const core::Script& script) {
     emit selectionChanged();
 }
 
+void FlowCanvas::setEmptyHint(const QString& hint) {
+    if (emptyHint_ == hint) return;
+    emptyHint_ = hint;
+    update();
+}
+
 void FlowCanvas::setSteps(const core::StepList& steps) {
     script_.steps = steps;
     selected_.clear();
@@ -631,10 +637,11 @@ void FlowCanvas::paintEvent(QPaintEvent*) {
         QFont hintFont = painter.font();
         hintFont.setPointSizeF(hintFont.pointSizeF() + 1.5);
         painter.setFont(hintFont);
+        // The palette is not on screen on a run-only install, so the usual hint
+        // would be telling the user to drag from a list that is not there.
         painter.drawText(rect().adjusted(40, 40, -40, -40),
                          Qt::AlignTop | Qt::AlignHCenter | Qt::TextWordWrap,
-                         QStringLiteral("從左邊的積木清單點兩下，或直接拖過來，\n"
-                                        "就能開始組流程。"));
+                         emptyHint_);
     }
 
     // Painted in layout order so a child lands on top of its parent's mouth.

@@ -86,7 +86,13 @@ serialized as a string. Fields per type:
 
 - click / double_click: {"target": <target>, "button": "left"|"right"|"middle"}
 - type_text: {"text": "...", "interval_ms": 0}      // {{var}} expands at run time
-- key_press: {"keys": "ctrl+s"}                      // ctrl / alt / shift / win
+- key_press: {"keys": "ctrl+s"}
+             // modifiers: ctrl / alt / shift / win
+             // named keys: enter tab escape space backspace up down left right
+             //   home end pageup pagedown insert(ins) delete(del) f1-f12
+             // anything else is one character, e.g. "a", "7"
+             // An unrecognised name fails the step rather than doing nothing,
+             // so use these spellings.
 - wait: {"ms": 500}
 - ocr_find: {"text": "登入", "match": "exact"|"contains"|"regex",
              "offset_x": 0, "offset_y": 0,

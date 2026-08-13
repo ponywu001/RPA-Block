@@ -33,6 +33,10 @@ public:
     const core::Script& script() const { return script_; }
     void setSteps(const core::StepList& steps);
 
+    /// What an empty canvas says. The default points at the block palette, which
+    /// is not on screen when this install is run-only.
+    void setEmptyHint(const QString& hint);
+
     /// Selection, as a path. Empty when nothing is selected.
     const StepPath& selectedPath() const { return selected_; }
     void selectPath(const StepPath& path);
@@ -69,6 +73,9 @@ protected:
     void leaveEvent(QEvent* event) override;
 
 private:
+    QString emptyHint_ = QStringLiteral("從左邊的積木清單點兩下，或直接拖過來，\n"
+                                        "就能開始組流程。");
+
     struct Placed {
         StepPath path;
         core::StepType type;

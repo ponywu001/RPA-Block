@@ -289,6 +289,13 @@ void TargetPickerOverlay::buildPanel() {
         matchCombo_->setEnabled(on);
         if (on && hasSelection_) runOcrOnSelection();
     });
+
+    // `clicked` rather than `toggled`: it fires only for a real click, so the
+    // panel's own setChecked() calls do not get mistaken for the user making a
+    // choice.
+    for (QRadioButton* radio : {ocrRadio_, relativeRadio_, templateRadio_}) {
+        connect(radio, &QRadioButton::clicked, this, [this] { modeChosenByUser_ = true; });
+    }
 }
 
 bool TargetPickerOverlay::beginPick(QString& error) {
@@ -301,6 +308,9 @@ bool TargetPickerOverlay::beginPick(QString& error) {
         recorder::uninitializeUiaForThread();
     }
     proposedRelative_.reset();
+    // A fresh picking session starts with no choice made, so the panel may
+    // suggest again.
+    modeChosenByUser_ = false;
 
     std::string captureError;
     const cv::Mat capture = vision::ScreenCapture::grab(std::nullopt, captureError);
@@ -664,9 +674,12 @@ void TargetPickerOverlay::proposeRelativeTarget() {
         QStringLiteral("由程式本身回報的控制項資訊定位，不受字級、顯示縮放或視窗位移影響。"
                        "遠端桌面或自繪介面則不適用，那時請改用上面兩種。"));
     relativeRadio_->setVisible(true);
-    // Pre-selected: when it is available it is the better answer, and a user who
-    // does not read the options should still land on the sturdier target.
-    relativeRadio_->setChecked(true);
+
+    // Pre-selected only while the user has not picked a mode themselves. It is
+    // the sturdier target, so it is worth offering by default -- but someone who
+    // deliberately chose image matching and then drew a box does not want the
+    // panel quietly switching them to something else on release.
+    if (!modeChosenByUser_) relativeRadio_->setChecked(true);
 }
 
 void TargetPickerOverlay::confirm() {

@@ -58,6 +58,8 @@ private:
 
     void loadInto();
     void emitEdit();
+    /// Enable exactly the target fields the chosen locate mode uses.
+    void updateTargetFieldStates();
     int pageIndexFor(core::StepType type) const;
 
     core::Step step_;

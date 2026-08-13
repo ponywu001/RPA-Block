@@ -149,7 +149,13 @@ QWidget* PropertyPanel::buildClickPage() {
     targetKindCombo_->addItem(QStringLiteral("某個文字旁邊的控制項"), QStringLiteral("relative"));
     targetKindCombo_->addItem(QStringLiteral("固定座標"), QStringLiteral("point"));
     form->addRow(QStringLiteral("定位方式"), targetKindCombo_);
-    connect(targetKindCombo_, &QComboBox::currentIndexChanged, this, [this] { emitEdit(); });
+    connect(targetKindCombo_, &QComboBox::currentIndexChanged, this, [this] {
+        // Before emitEdit(), and outside its `loading_` guard: the fields for
+        // the newly chosen mode have to come alive immediately, whether or not
+        // this change is worth writing back to the step.
+        updateTargetFieldStates();
+        emitEdit();
+    });
 
     targetTextEdit_ = new QLineEdit(page);
     form->addRow(QStringLiteral("錨點文字"), targetTextEdit_);
@@ -344,7 +350,7 @@ QWidget* PropertyPanel::buildKeyPressPage() {
     auto* hint = new QLabel(
         QStringLiteral("修飾鍵：ctrl、alt、shift、win。\n"
                        "特殊鍵：enter、tab、escape、f1–f12、方向鍵、home、end、"
-                       "pageup、pagedown、delete、backspace、space。"),
+                       "pageup、pagedown、insert（ins）、delete（del）、backspace、space。"),
         page);
     hint->setWordWrap(true);
     form->addRow(QString(), hint);
@@ -710,12 +716,28 @@ void PropertyPanel::loadInto() {
     appArgsEdit_->setText(QString::fromStdString(step_.launchArgs));
     appWorkingDirEdit_->setText(QString::fromStdString(step_.workingDir));
 
-    // Reveal only the target fields the chosen locate mode uses.
+    updateTargetFieldStates();
+
+    const bool locatingByText = step_.type == core::StepType::OcrFind;
+    locateTextEdit_->setEnabled(locatingByText);
+    locateMatchCombo_->setEnabled(locatingByText);
+    locateTemplateEdit_->setEnabled(!locatingByText);
+    locateThresholdSpin_->setEnabled(!locatingByText);
+
+    loading_ = false;
+}
+
+void PropertyPanel::updateTargetFieldStates() {
+    // Also called straight from the locate-mode combo, not only when a block is
+    // loaded. Living only in loadInto() meant switching mode left the fields of
+    // the mode just chosen greyed out until the user selected another block and
+    // came back -- which reads as "this cannot be edited".
     const QString kind = targetKindCombo_->currentData().toString();
     const bool isOcr = kind == QStringLiteral("ocr");
     const bool isImage = kind == QStringLiteral("image");
     const bool isRelative = kind == QStringLiteral("relative");
     const bool isPoint = kind == QStringLiteral("point");
+
     // The anchor text and its match mode are shared: for a relative target they
     // name the label rather than the thing being clicked.
     targetTextEdit_->setEnabled(isOcr || isRelative);
@@ -727,14 +749,6 @@ void PropertyPanel::loadInto() {
     targetDistanceSpin_->setEnabled(isRelative);
     targetPointXSpin_->setEnabled(isPoint);
     targetPointYSpin_->setEnabled(isPoint);
-
-    const bool locatingByText = step_.type == core::StepType::OcrFind;
-    locateTextEdit_->setEnabled(locatingByText);
-    locateMatchCombo_->setEnabled(locatingByText);
-    locateTemplateEdit_->setEnabled(!locatingByText);
-    locateThresholdSpin_->setEnabled(!locatingByText);
-
-    loading_ = false;
 }
 
 core::Step PropertyPanel::step() const {

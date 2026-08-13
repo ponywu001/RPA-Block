@@ -76,7 +76,10 @@ WORD virtualKeyFor(const std::string& name) {
         {"enter", WORD(VK_RETURN)},   {"return", WORD(VK_RETURN)}, {"tab", WORD(VK_TAB)},
         {"esc", WORD(VK_ESCAPE)},     {"escape", WORD(VK_ESCAPE)}, {"space", WORD(VK_SPACE)},
         {"backspace", WORD(VK_BACK)}, {"delete", WORD(VK_DELETE)}, {"del", WORD(VK_DELETE)},
-        {"insert", WORD(VK_INSERT)},  {"home", WORD(VK_HOME)},     {"end", WORD(VK_END)},
+        // "ins" alongside "insert" for the same reason "del" sits next to
+        // "delete": that is what the key says on the keyboard.
+        {"insert", WORD(VK_INSERT)},  {"ins", WORD(VK_INSERT)},
+        {"home", WORD(VK_HOME)},      {"end", WORD(VK_END)},
         {"pageup", WORD(VK_PRIOR)},   {"pagedown", WORD(VK_NEXT)}, {"up", WORD(VK_UP)},
         {"down", WORD(VK_DOWN)},      {"left", WORD(VK_LEFT)},     {"right", WORD(VK_RIGHT)},
         {"f1", WORD(VK_F1)},   {"f2", WORD(VK_F2)},   {"f3", WORD(VK_F3)},   {"f4", WORD(VK_F4)},

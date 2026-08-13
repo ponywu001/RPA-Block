@@ -108,6 +108,13 @@ private:
     void applySettings();
     void startApiServerIfConfigured();
     void startTunnelIfConfigured();
+    /// The empty-canvas reset, without the authoring gate in front of it.
+    void resetToEmptyFlow();
+    /// Show or hide the authoring surface according to the licence gate.
+    void applyAuthoringLock();
+    void toggleAuthoringLock();
+    /// Gate an authoring action, restoring the editor UI when this unlocks it.
+    bool requireAuthoring(const QString& reason);
     void loadOcrModels();
 
     void setScript(const core::Script& script, const QString& path);
@@ -183,6 +190,11 @@ private:
 
     /// Every dock, so the 外觀 menu can offer each one back.
     QList<QDockWidget*> docks_;
+    /// The docks authoring happens in. Disabled while this install is
+    /// run-only, which is what makes the lock mean "cannot build automations
+    /// here" rather than only "cannot press Save".
+    QList<QDockWidget*> authoringDocks_;
+    QAction* unlockAction_ = nullptr;
     /// The layout as built, captured before the user can rearrange it.
     QByteArray defaultLayout_;
 

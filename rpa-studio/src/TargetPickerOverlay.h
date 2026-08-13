@@ -119,6 +119,10 @@ private:
     std::vector<recorder::UiaNode> uiaSnapshot_;
     /// The relative target proposed for the current selection, if any.
     std::optional<core::Target> proposedRelative_;
+    /// Set once the user picks a mode themselves. After that the panel stops
+    /// choosing for them: a suggestion that overrides a deliberate choice is
+    /// not a suggestion.
+    bool modeChosenByUser_ = false;
 
     QString recognisedText_;
     double recognisedConfidence_ = 0.0;

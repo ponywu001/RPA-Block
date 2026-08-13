@@ -4,6 +4,8 @@
     src/MainWindow.h
     src/AppSettings.cpp
     src/AppSettings.h
+    src/AuthorGate.cpp
+    src/AuthorGate.h
     src/ExecutionController.cpp
     src/ExecutionController.h
     src/FlowCanvas.cpp
@@ -109,6 +111,27 @@ if(WIN32)
     else()
         message(WARNING "Could not locate opencv_world*.dll under ${OpenCV_DIR}; "
                         "copy it beside rpa-studio.exe manually.")
+    endif()
+
+    # The MSVC runtime, deployed beside the executable.
+    #
+    # windeployqt is invoked with --no-compiler-runtime, so nothing else brings
+    # these along. That is invisible here -- a machine with the build tools
+    # installed already has them on the system -- and fatal on a customer's,
+    # where the app dies at startup with a missing-DLL dialog before any of our
+    # code runs. App-local deployment is permitted for the redistributable and
+    # avoids making the installer chain a second setup program.
+    set(CMAKE_INSTALL_UCRT_LIBRARIES FALSE)
+    include(InstallRequiredSystemLibraries)
+    if(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+        add_custom_command(TARGET rpa-studio POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} "$<TARGET_FILE_DIR:rpa-studio>"
+            COMMENT "Copying the MSVC runtime")
+    else()
+        message(WARNING
+            "Could not locate the MSVC redistributable DLLs; the build output will "
+            "only start on machines that already have them installed.")
     endif()
 
     # ONNX Runtime sits next to the import library it was found through.

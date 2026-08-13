@@ -354,3 +354,19 @@ RPA_TEST(the_prompt_steers_away_from_pixel_offsets_for_form_fields) {
     CHECK(prompt.find("relative target anchored on its label") != std::string::npos);
     CHECK(prompt.find("offset_x") != std::string::npos);
 }
+
+RPA_TEST(the_prompt_lists_the_named_keys_the_input_backend_accepts) {
+    // The assistant cannot guess this vocabulary, and a name outside it fails
+    // the step at run time rather than being ignored -- so a key the backend
+    // knows but the prompt omits is one the assistant will never emit, and the
+    // user is left wondering why their flow cannot press Insert.
+    const std::string prompt = rpa::ai::rpaSystemPrompt();
+
+    for (const char* key : {"enter", "tab", "escape", "space", "backspace", "home", "end",
+                            "pageup", "pagedown", "insert", "delete", "f1-f12"}) {
+        CHECK(prompt.find(key) != std::string::npos);
+    }
+    // Both spellings, matching the keycaps.
+    CHECK(prompt.find("insert(ins)") != std::string::npos);
+    CHECK(prompt.find("delete(del)") != std::string::npos);
+}
